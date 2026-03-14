@@ -1,0 +1,48 @@
+# 你的持仓和监控规则配置
+# 每只股票独立配置买卖条件，所有条件基于客观指标，不依赖 AI 主观判断
+
+watchlist:
+
+  # 示例：苹果（美股）
+  AAPL:
+    name: "苹果"
+    market: US
+    # 卖出条件：满足任意一条即触发提醒
+    sell_rules:
+      - type: price_above        # 价格超过目标价
+        value: 220
+        note: "达到目标价，考虑止盈"
+      - type: pe_above           # PE 过高
+        value: 35
+        note: "估值过高，性价比下降"
+      - type: price_drop_pct     # 从持仓成本跌幅超过 X%（止损）
+        value: 15
+        note: "触发止损线"
+    # 买入条件：满足全部条件才触发提醒
+    buy_rules:
+      - type: price_below        # 价格低于目标买入价
+        value: 165
+      - type: pe_below           # PE 合理
+        value: 25
+      - type: roe_above          # ROE 健康
+        value: 15
+    # 持仓成本（用于计算止损）
+    cost_basis: 175.0
+
+  # 示例：腾讯（港股）
+  "00700":
+    name: "腾讯控股"
+    market: HK
+    sell_rules:
+      - type: price_above
+        value: 420
+        note: "达到目标价"
+      - type: pe_above
+        value: 30
+        note: "估值偏高"
+    buy_rules:
+      - type: price_below
+        value: 300
+      - type: pe_below
+        value: 18
+    cost_basis: 340.0
