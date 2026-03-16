@@ -1,0 +1,24 @@
+README.md
+  125ff6829f41bed1 20-25,40-44,59,64-66,103-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "225542f381673aabebbeb1a8207161c32d41b6b5",
+  "prompts": {
+    "125ff6829f41bed1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c1721230-99f7-47d9-9bbe-89a3eae39dee",
+        "model": "claude-4.6-opus-high-thinking"
+      },
+      "human_author": "cvte-data <cvte-data@Ivys-MacBook-Pro.local>",
+      "messages": [],
+      "total_additions": 28,
+      "total_deletions": 4,
+      "accepted_lines": 28,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/3a3f946a38025dde6bfaa413658533e9c056c2f3642890149231864329c0ee51"
+    }
+  }
+}
