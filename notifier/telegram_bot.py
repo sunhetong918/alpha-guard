@@ -83,6 +83,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.message.reply_text(msg)
 
 
+async def send_news_alert(article: dict) -> None:
+    """
+    发送新闻预警，附带 AI 分析
+    article 需包含: title, ai_score, ai_analysis, affected_direction,
+                    related_tickers, related_topics, source, url
+    """
+    score = article.get("ai_score", 0)
+    stars = "⭐" * score
+    direction = article.get("affected_direction", "未知")
+    direction_emoji = {"利好": "📈", "利空": "📉", "中性": "➡️"}.get(direction, "❓")
+
+    tickers = ", ".join(article.get("related_tickers", [])) or "—"
+    topics = ", ".join(article.get("related_topics", [])) or "—"
+
+    text = (
+        f"📰 *新闻预警*\n\n"
+        f"*{article.get('title', '无标题')}*\n\n"
+        f"影响评估：{stars} {score}/5\n"
+        f"方向：{direction_emoji} {direction}\n"
+        f"关联持仓：{tickers}\n"
+        f"关联主题：{topics}\n\n"
+        f"💡 AI 分析：{article.get('ai_analysis', '—')}\n\n"
+        f"来源：{article.get('source', '未知')} | "
+        f"[原文链接]({article.get('url', '')})\n\n"
+        f"⚠️ 以上为 AI 分析，仅供参考，不构成投资建议。"
+    )
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    async with app:
+        await app.bot.send_message(
+            chat_id=CHAT_ID,
+            text=text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+
 def run_bot() -> None:
     """启动 Bot 监听（用于接收按钮回调）"""
     app = Application.builder().token(BOT_TOKEN).build()

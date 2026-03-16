@@ -1,0 +1,47 @@
+# ========================================
+# 新闻监控配置
+# ========================================
+
+# 个股关联关键词 —— 当新闻包含这些词时，视为与该股票相关
+stock_keywords:
+  AAPL:
+    en: ["Apple", "iPhone", "iPad", "Tim Cook", "App Store"]
+    zh: ["苹果公司", "苹果手机"]
+  "00700":
+    en: ["Tencent", "WeChat"]
+    zh: ["腾讯", "微信", "游戏版号", "王者荣耀"]
+
+# 宏观主题 —— 影响整个市场的大事件
+macro_topics:
+  - label: "货币政策"
+    keywords: ["美联储", "Fed", "加息", "降息", "利率", "QE", "缩表", "鲍威尔", "Powell"]
+  - label: "贸易摩擦"
+    keywords: ["关税", "tariff", "贸易战", "trade war", "出口管制", "制裁", "sanctions"]
+  - label: "地缘政治"
+    keywords: ["台海", "Taiwan", "南海", "中美关系", "中美", "脱钩", "decoupling"]
+  - label: "军事冲突"
+    keywords: ["战争", "war", "军事", "military", "导弹", "missile", "冲突", "conflict"]
+  - label: "科技监管"
+    keywords: ["反垄断", "antitrust", "数据安全", "AI监管", "AI regulation"]
+  - label: "经济数据"
+    keywords: ["CPI", "PPI", "非农", "nonfarm", "GDP", "PMI", "失业率", "unemployment"]
+
+# AI 过滤设置
+ai_filter:
+  enabled: true
+  alert_threshold: 3        # 1-5 分，只推送 >= 此分数的新闻
+  max_ai_calls_per_scan: 20 # 每轮扫描最多调 AI 评分的条数（控制成本）
+
+# 新闻源设置
+sources:
+  finnhub:
+    enabled: true
+    # 拉取最近 N 小时的新闻
+    lookback_hours: 6
+  newsapi:
+    enabled: true
+    lookback_hours: 12
+    # 自定义搜索关键词（除了 macro_topics 里的，还额外搜这些）
+    extra_queries: ["China stock market", "港股", "美股"]
+  akshare:
+    enabled: true
