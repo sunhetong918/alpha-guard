@@ -17,8 +17,12 @@ alpha-guard/
 ├── signals/
 │   ├── rules.yaml           # your watchlist + buy/sell rules
 │   └── engine.py            # rule evaluation logic
-├── notifier/telegram_bot.py # Telegram alerts with confirm buttons
-├── main.py                  # scheduler (runs daily at market open)
+├── news/                    # news monitoring module
+│   ├── config.yaml          # keywords, macro topics, source settings
+│   ├── sources.py           # Finnhub + NewsAPI + akshare news feeds
+│   └── filter.py            # keyword matching + Claude AI scoring (1-5)
+├── notifier/telegram_bot.py # Telegram alerts (signals + news)
+├── main.py                  # scheduler (stocks + news every 4h)
 └── .claude/skills/          # Claude Code skills
     ├── stock-analyze.md     # /stock-analyze AAPL
     ├── stock-scan.md        # /stock-scan
@@ -33,7 +37,11 @@ cd alpha-guard
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env
+# fill in your API keys in .env:
+#   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+#   FINNHUB_API_KEY   (free: https://finnhub.io/register)
+#   NEWSAPI_API_KEY   (free: https://newsapi.org/register)
+#   ANTHROPIC_API_KEY
 ```
 
 ### Get your Telegram credentials
@@ -48,9 +56,14 @@ cp .env.example .env
 python main.py
 ```
 
-**Manual scan right now**:
+**Manual scan stocks**:
 ```bash
 python main.py scan
+```
+
+**Manual scan news**:
+```bash
+python main.py news
 ```
 
 **Claude Code skills** (from inside this repo):
@@ -86,6 +99,17 @@ Edit `signals/rules.yaml`. Supported rule types:
 
 Sell rules: **any** condition triggers an alert.
 Buy rules: **all** conditions must be met.
+
+## News Monitoring
+
+The `news/` module scans financial, political and military news every 4 hours:
+
+1. **Fetch** — pulls from Finnhub (US company + market news), NewsAPI (global), akshare (CN financial)
+2. **Match** — keyword filter links articles to your watchlist stocks and macro topics
+3. **Score** — Claude AI rates impact 1-5, only alerts ≥ 3 get pushed
+4. **Notify** — Telegram message with AI analysis, direction (bullish/bearish), and related holdings
+
+Configure keywords and topics in `news/config.yaml`.
 
 ## Roadmap
 
