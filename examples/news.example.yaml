@@ -1,0 +1,27 @@
+# Example only. Network access and AI calls are deliberately disabled.
+stock_keywords:
+  AAPL:
+    en: ["Apple", "iPhone", "Tim Cook"]
+    zh: ["苹果公司"]
+
+macro_topics:
+  - label: "Monetary policy"
+    keywords: ["Fed", "Federal Reserve", "interest rates"]
+
+ai_filter:
+  enabled: false
+  alert_threshold: 3
+  max_ai_calls_per_scan: 10
+
+sources:
+  finnhub:
+    enabled: false
+    lookback_hours: 6
+  newsapi:
+    enabled: false
+    lookback_hours: 12
+    extra_queries: ["US stock market"]
+    language: en
+    page_size: 20
+  akshare:
+    enabled: false

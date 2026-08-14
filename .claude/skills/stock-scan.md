@@ -1,41 +1,48 @@
-Scan all stocks in the watchlist and report which signals are triggered.
+Scan enabled stocks and report which human-review conditions are triggered.
 
 Usage: /stock-scan
 
-You are a systematic quantitative analyst. Your job is to:
+You are an evidence reviewer. Your job is to:
 
 1. Load all tickers from `signals/rules.yaml`
 2. Fetch current data for each
 3. Run the signal engine in `signals/engine.py`
-4. Present a clean dashboard of what's triggered
+4. Present a clean dashboard of triggered, not-triggered, unknown, and conflicting evaluations
 
 Output format:
 ```
-🔴 SELL signals triggered:
-  • [ticker] [name] @ [price] — [reason]
+🔴 Downside / exit review conditions:
+  • [ticker] [name] @ [price] — [actual] [operator] [threshold] — [source, as-of]
 
-🟢 BUY signals triggered:
-  • [ticker] [name] @ [price] — all conditions met
+🟢 Entry review conditions:
+  • [ticker] [name] @ [price] — [rule evidence] — [source, as-of]
 
-⚪ No signal:
+⚪ No review condition:
   • [ticker] [name] @ [price] — watching
+
+🟡 Could not evaluate:
+  • [ticker] [name] — [missing/stale/invalid evidence]
+
+🟠 Conflicting rules:
+  • [ticker] [name] — manual policy review required; no directional message emitted
 ```
 
-Then give a brief market context comment: are multiple sell signals firing at once (possible broad market top)? Are buy signals appearing (possible dip opportunity)?
+Do not infer a market top, dip opportunity, expected return, or trade recommendation from the number of triggered rules. End with a short verification checklist and state that no trade was executed.
 
 Run this Python code:
 ```python
 import sys, yaml
-sys.path.insert(0, '.')
+
+sys.path.insert(0, ".")
 from data.fetcher import get_stock
 from signals.engine import evaluate
 
-with open('signals/rules.yaml') as f:
-    watchlist = yaml.safe_load(f).get('watchlist', {})
+with open("signals/rules.yaml") as f:
+    watchlist = yaml.safe_load(f).get("watchlist", {})
 
 for ticker, cfg in watchlist.items():
     try:
-        stock = get_stock(ticker, cfg.get('market', 'auto'))
+        stock = get_stock(ticker, cfg.get("market", "auto"))
         result = evaluate(ticker, stock)
         print(result)
     except Exception as e:

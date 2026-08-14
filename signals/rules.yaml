@@ -1,48 +1,99 @@
-# 你的持仓和监控规则配置
-# 每只股票独立配置买卖条件，所有条件基于客观指标，不依赖 AI 主观判断
+# Safe repository defaults. Copy examples/rules.example.yaml and enable only
+# instruments whose thresholds, currency and evidence policy you have reviewed.
+reliability:
+  freshness:
+    future_tolerance_seconds: 300.0
+    fields:
+      price:
+        max_source_age_seconds: 1800.0
+        max_observation_age_seconds: 900.0
+        aging_ratio: 0.8
+        allow_observed_only: false
+        session_aware: true
+      pe_ttm:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+      pb:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+      roe:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+  provider:
+    request_timeout_seconds: 10.0
+    bulkhead_max_calls: 4
+    max_attempts: 3
+    base_backoff_seconds: 0.25
+    max_backoff_seconds: 4.0
+    max_retry_after_seconds: 60.0
+    failure_threshold: 3
+    open_seconds: 300.0
+    half_open_max_calls: 1
+    fresh_cache_seconds: 300.0
+    stale_if_error_seconds: 86400.0
+    observation_limit: 100
 
 watchlist:
-
-  # 示例：苹果（美股）
   AAPL:
     name: "苹果"
     market: US
-    # 卖出条件：满足任意一条即触发提醒
-    sell_rules:
-      - type: price_above        # 价格超过目标价
-        value: 220
-        note: "达到目标价，考虑止盈"
-      - type: pe_above           # PE 过高
-        value: 35
-        note: "估值过高，性价比下降"
-      - type: price_drop_pct     # 从持仓成本跌幅超过 X%（止损）
-        value: 15
-        note: "触发止损线"
-    # 买入条件：满足全部条件才触发提醒
-    buy_rules:
-      - type: price_below        # 价格低于目标买入价
-        value: 165
-      - type: pe_below           # PE 合理
-        value: 25
-      - type: roe_above          # ROE 健康
-        value: 15
-    # 持仓成本（用于计算止损）
+    currency: USD
+    enabled: false
     cost_basis: 175.0
+    alert_cooldown_hours: 24.0
+    sell_rules:
+      - id: aapl-price-upper-review
+        type: price_above
+        value: 220.0
+        note: "报价达到预设上界，人工复核证据"
+      - id: aapl-pe-upper-review
+        type: pe_above
+        value: 35.0
+        note: "估值指标达到预设上界，人工复核口径"
+      - id: aapl-cost-drawdown-review
+        type: price_drop_pct
+        value: 15.0
+        note: "相对成本的跌幅达到预设阈值，人工复核数据"
+    buy_rules:
+      - id: aapl-price-lower-review
+        type: price_below
+        value: 165.0
+      - id: aapl-pe-lower-review
+        type: pe_below
+        value: 25.0
+      - id: aapl-roe-quality-review
+        type: roe_above
+        value: 15.0
 
-  # 示例：腾讯（港股）
   "00700":
     name: "腾讯控股"
     market: HK
-    sell_rules:
-      - type: price_above
-        value: 420
-        note: "达到目标价"
-      - type: pe_above
-        value: 30
-        note: "估值偏高"
-    buy_rules:
-      - type: price_below
-        value: 300
-      - type: pe_below
-        value: 18
+    currency: HKD
+    enabled: false
     cost_basis: 340.0
+    alert_cooldown_hours: 24.0
+    sell_rules:
+      - id: tencent-price-upper-review
+        type: price_above
+        value: 420.0
+        note: "报价达到预设上界，人工复核证据"
+      - id: tencent-pe-upper-review
+        type: pe_above
+        value: 30.0
+        note: "估值指标达到预设上界，人工复核口径"
+    buy_rules:
+      - id: tencent-price-lower-review
+        type: price_below
+        value: 300.0
+      - id: tencent-pe-lower-review
+        type: pe_below
+        value: 18.0

@@ -1,0 +1,416 @@
+name: Desktop release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYINSTALLER_VERSION: "6.21.0"
+  UV_PYTHON: "3.12"
+
+jobs:
+  build-native:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-15
+            expected_machine: arm64
+            artifact_name: alpha-guard-macos-arm64
+            archive_name: alpha-guard-macos-arm64.tar.gz
+          - label: Windows x64
+            runner: windows-2025
+            expected_machine: amd64
+            artifact_name: alpha-guard-windows-x64
+            archive_name: alpha-guard-windows-x64.zip
+
+    steps:
+      # GitHub currently maps macos-15 to arm64 and windows-2025 to x64:
+      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync locked release dependencies without editable project
+        shell: bash
+        run: >-
+          uv sync --frozen --no-dev --extra desktop --extra desktop-build
+          --extra notifications --no-install-project
+
+      - name: Build and install release wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release/wheel
+          uv build \
+            --wheel \
+            --out-dir .release/wheel
+          wheels=(.release/wheel/alpha_guard-*.whl)
+          if [[ "${#wheels[@]}" -ne 1 || ! -f "${wheels[0]}" ]]; then
+            echo "expected exactly one Alpha Guard wheel" >&2
+            exit 1
+          fi
+          uv pip install \
+            --python .venv \
+            --no-deps \
+            "${wheels[0]}"
+          uv run --no-sync python -I - <<'PY'
+          import importlib.metadata
+          import json
+          from pathlib import Path
+          import sys
+
+          import desktop.app
+          import guardian.service
+
+          distribution = importlib.metadata.distribution("alpha-guard")
+          direct_url = distribution.read_text("direct_url.json")
+          assert direct_url is not None
+          metadata = json.loads(direct_url)
+          assert "archive_info" in metadata
+          assert metadata.get("dir_info", {}).get("editable") is not True
+          environment = Path(sys.prefix).resolve()
+          for module in (desktop.app, guardian.service):
+              assert Path(module.__file__).resolve().is_relative_to(environment)
+          PY
+
+      - name: Verify locked release builder
+        shell: bash
+        run: >-
+          test "$(uv run --no-sync pyinstaller --version)"
+          = "${PYINSTALLER_VERSION}"
+
+      - name: Verify native architecture
+        shell: bash
+        run: >-
+          uv run --no-sync python -c
+          "import platform; actual=platform.machine().lower();
+          expected='${{ matrix.expected_machine }}';
+          print(f'build machine: {actual}');
+          assert actual == expected, f'expected {expected}, got {actual}'"
+
+      - name: Generate release-only launchers
+        shell: bash
+        run: |
+          mkdir -p .release
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+
+          release = Path(".release")
+          release.joinpath("desktop_launcher.py").write_text(
+              """import os
+          import sys
+          from pathlib import Path
+
+          executable = Path(sys.executable).resolve()
+          if sys.platform == "darwin" and executable.parent.name == "MacOS":
+              bundle_root = executable.parents[3]
+          else:
+              bundle_root = executable.parents[1]
+          guardian_dir = bundle_root / "alpha-guard-guardian"
+          os.environ["PATH"] = (
+              str(guardian_dir) + os.pathsep + os.environ.get("PATH", "")
+          )
+
+          from desktop.app import main
+
+          raise SystemExit(main())
+          """,
+              encoding="utf-8",
+          )
+          release.joinpath("guardian_launcher.py").write_text(
+              """from guardian.service import main
+
+          raise SystemExit(main())
+          """,
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Build macOS arm64 onedir bundles
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          SIGN_ARGS=()
+          KEYCHAIN_PATH="${RUNNER_TEMP}/alpha-guard-build.keychain-db"
+          CERTIFICATE_PATH="${RUNNER_TEMP}/alpha-guard-build.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          cleanup() {
+            rm -f "${CERTIFICATE_PATH}"
+            security delete-keychain "${KEYCHAIN_PATH}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          if [[ -n "${MACOS_CERTIFICATE_P12_BASE64}" \
+                && -n "${MACOS_CERTIFICATE_PASSWORD}" \
+                && -n "${MACOS_SIGNING_IDENTITY}" ]]; then
+            printf '%s' "${MACOS_CERTIFICATE_P12_BASE64}" \
+              | openssl base64 -d -A -out "${CERTIFICATE_PATH}"
+            security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+            security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+            security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+            security import "${CERTIFICATE_PATH}" \
+              -k "${KEYCHAIN_PATH}" \
+              -P "${MACOS_CERTIFICATE_PASSWORD}" \
+              -T /usr/bin/codesign
+            security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s \
+              -k "${KEYCHAIN_PASSWORD}" \
+              "${KEYCHAIN_PATH}"
+            security list-keychains -d user -s "${KEYCHAIN_PATH}"
+            SIGN_ARGS+=(--codesign-identity "${MACOS_SIGNING_IDENTITY}")
+            touch .release/macos-developer-id-signed
+          else
+            echo "Developer ID secrets are incomplete; building ad-hoc signed test artifacts."
+          fi
+
+          uv run --no-sync pyinstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --windowed \
+            --contents-directory . \
+            --target-architecture arm64 \
+            --osx-bundle-identifier com.alpha-guard.desktop \
+            --name AlphaGuard-Desktop \
+            --hidden-import PySide6.QtNetwork \
+            --collect-all keyring \
+            --add-data "desktop/ui/fixtures/guardian.json:desktop/ui/fixtures" \
+            "${SIGN_ARGS[@]}" \
+            .release/desktop_launcher.py
+
+          uv run --no-sync pyinstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --console \
+            --contents-directory . \
+            --target-architecture arm64 \
+            --name alpha-guard-guardian \
+            --hidden-import PySide6.QtNetwork \
+            --collect-all keyring \
+            --copy-metadata alpha-guard \
+            --add-data "signals/rules.yaml:signals" \
+            --add-data "news/config.yaml:news" \
+            "${SIGN_ARGS[@]}" \
+            .release/guardian_launcher.py
+
+          # PyInstaller performs ad-hoc signing when no identity is provided;
+          # https://pyinstaller.org/en/stable/usage.html#macos-specific-options
+
+      - name: Build Windows x64 onedir bundles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv run --no-sync pyinstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --windowed `
+            --contents-directory . `
+            --name AlphaGuard-Desktop `
+            --hidden-import PySide6.QtNetwork `
+            --collect-all keyring `
+            --add-data "desktop/ui/fixtures/guardian.json:desktop/ui/fixtures" `
+            .release/desktop_launcher.py
+
+          uv run --no-sync pyinstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --console `
+            --contents-directory . `
+            --name alpha-guard-guardian `
+            --hidden-import PySide6.QtNetwork `
+            --collect-all keyring `
+            --copy-metadata alpha-guard `
+            --add-data "signals/rules.yaml:signals" `
+            --add-data "news/config.yaml:news" `
+            .release/guardian_launcher.py
+
+          if ($env:WINDOWS_CERTIFICATE_PFX_BASE64 -and `
+              $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            $certificatePath = Join-Path $env:RUNNER_TEMP "alpha-guard-build.pfx"
+            try {
+              [IO.File]::WriteAllBytes(
+                $certificatePath,
+                [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+              )
+              $signtool = Get-ChildItem `
+                "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+                -Filter signtool.exe `
+                -Recurse |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+              if (-not $signtool) {
+                throw "x64 signtool.exe was not found"
+              }
+              foreach ($executable in @(
+                "dist\AlphaGuard-Desktop\AlphaGuard-Desktop.exe",
+                "dist\alpha-guard-guardian\alpha-guard-guardian.exe"
+              )) {
+                & $signtool.FullName sign `
+                  /f $certificatePath `
+                  /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+                  /fd SHA256 `
+                  /td SHA256 `
+                  /tr http://timestamp.digicert.com `
+                  $executable
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Authenticode signing failed"
+                }
+              }
+              New-Item .release/windows-authenticode-signed -ItemType File | Out-Null
+            }
+            finally {
+              Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue
+            }
+          }
+          else {
+            Write-Host "Authenticode secrets are incomplete; building unsigned test artifacts."
+          }
+
+      - name: Smoke native launchers on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/AlphaGuard-Desktop.app/Contents/MacOS/AlphaGuard-Desktop --help
+          dist/alpha-guard-guardian/alpha-guard-guardian --help
+          dist/alpha-guard-guardian/alpha-guard-guardian --version
+          codesign --verify --deep --strict dist/AlphaGuard-Desktop.app
+          codesign --verify --deep --strict dist/alpha-guard-guardian/alpha-guard-guardian
+
+      - name: Smoke native launchers on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "dist\AlphaGuard-Desktop\AlphaGuard-Desktop.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "Desktop --help failed" }
+          & "dist\alpha-guard-guardian\alpha-guard-guardian.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "Guardian --help failed" }
+          & "dist\alpha-guard-guardian\alpha-guard-guardian.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Guardian --version failed" }
+
+      - name: Assemble macOS artifact and optionally notarize
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/AlphaGuard
+          mv dist/AlphaGuard-Desktop.app release/AlphaGuard/
+          mv dist/alpha-guard-guardian release/AlphaGuard/
+          cp .env.example release/AlphaGuard/alpha-guard-guardian/.env.example
+          cp README.md docs/DESKTOP.md release/AlphaGuard/
+
+          SIGNING_STATUS="ad-hoc; unsigned test artifact"
+          if [[ -f .release/macos-developer-id-signed ]]; then
+            SIGNING_STATUS="Developer ID signed; not notarized"
+            if [[ -n "${APPLE_ID}" \
+                  && -n "${APPLE_TEAM_ID}" \
+                  && -n "${APPLE_APP_PASSWORD}" ]]; then
+              NOTARY_ARCHIVE="${RUNNER_TEMP}/alpha-guard-notarization.zip"
+              ditto -c -k --sequesterRsrc --keepParent \
+                release/AlphaGuard "${NOTARY_ARCHIVE}"
+              xcrun notarytool submit "${NOTARY_ARCHIVE}" \
+                --apple-id "${APPLE_ID}" \
+                --team-id "${APPLE_TEAM_ID}" \
+                --password "${APPLE_APP_PASSWORD}" \
+                --wait
+              xcrun stapler staple \
+                release/AlphaGuard/AlphaGuard-Desktop.app
+              SIGNING_STATUS="Developer ID signed and Apple notarized"
+            else
+              echo "Notarization secrets are incomplete; keeping signed test artifact."
+            fi
+          fi
+
+          {
+            echo "Alpha Guard native artifact"
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "platform=macOS"
+            echo "architecture=arm64"
+            echo "python=3.12"
+            echo "pyinstaller=${PYINSTALLER_VERSION}"
+            echo "signing=${SIGNING_STATUS}"
+          } > release/AlphaGuard/BUILD-INFO.txt
+
+          tar -czf "release/${{ matrix.archive_name }}" \
+            -C release AlphaGuard
+
+      - name: Assemble Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item release\AlphaGuard -ItemType Directory -Force | Out-Null
+          Move-Item dist\AlphaGuard-Desktop release\AlphaGuard\
+          Move-Item dist\alpha-guard-guardian release\AlphaGuard\
+          Copy-Item .env.example `
+            release\AlphaGuard\alpha-guard-guardian\.env.example
+          Copy-Item README.md,docs\DESKTOP.md release\AlphaGuard\
+
+          $signingStatus = "unsigned test artifact"
+          if (Test-Path .release\windows-authenticode-signed) {
+            $signingStatus = "Authenticode signed"
+          }
+          @(
+            "Alpha Guard native artifact"
+            "commit=$env:GITHUB_SHA"
+            "ref=$env:GITHUB_REF"
+            "platform=Windows"
+            "architecture=x64"
+            "python=3.12"
+            "pyinstaller=$env:PYINSTALLER_VERSION"
+            "signing=$signingStatus"
+          ) | Set-Content release\AlphaGuard\BUILD-INFO.txt -Encoding utf8
+
+          Compress-Archive `
+            -Path release\AlphaGuard `
+            -DestinationPath "release\${{ matrix.archive_name }}" `
+            -CompressionLevel Optimal
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.archive_name }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

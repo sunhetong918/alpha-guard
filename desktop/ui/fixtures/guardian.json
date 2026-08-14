@@ -1,0 +1,303 @@
+{
+  "health": {
+    "source": "fixture",
+    "generated_at": "2026-08-12T03:26:00+00:00",
+    "guardian": {
+      "state": "RUNNING",
+      "color": "GREEN",
+      "version": "0.3.0-dev",
+      "pid": 18426,
+      "started_at": "2026-08-12T00:03:11+00:00",
+      "last_heartbeat_at": "2026-08-12T03:26:00+00:00",
+      "launch_at_login": true
+    }
+  },
+  "cockpit": {
+    "receipt_id": "CPT-20260812-112600",
+    "generated_at": "2026-08-12T03:26:00+00:00",
+    "delivery_mode": "ACTIVE",
+    "overall_color": "AMBER",
+    "state": "DEGRADED",
+    "reason_codes": ["provider_degraded"],
+    "schedule": {
+      "markets": [
+        {
+          "market": "HK",
+          "expected_at": "2026-08-12T01:25:00+00:00",
+          "deadline_at": "2026-08-12T01:40:00+00:00",
+          "deadline_state": "completed",
+          "slo_30d": {
+            "good": 21,
+            "bad": 0,
+            "missing": 0,
+            "pending": 0,
+            "expected": 21,
+            "violations": 0,
+            "ratio": 1.0,
+            "error_rate": 0.0,
+            "burn_rate": 0.0
+          }
+        },
+        {
+          "market": "US",
+          "expected_at": "2026-08-11T13:25:00+00:00",
+          "deadline_at": "2026-08-11T13:40:00+00:00",
+          "deadline_state": "completed",
+          "slo_30d": {
+            "good": 20,
+            "bad": 0,
+            "missing": 1,
+            "pending": 0,
+            "expected": 21,
+            "violations": 1,
+            "ratio": 0.95238,
+            "error_rate": 0.04762,
+            "burn_rate": 4.762
+          }
+        }
+      ],
+      "slo_30d": {
+        "target": 0.99,
+        "good": 41,
+        "bad": 0,
+        "missing": 1,
+        "pending": 0,
+        "expected": 42,
+        "violations": 1,
+        "ratio": 0.97619,
+        "error_rate": 0.02381,
+        "burn_rate": 2.381
+      }
+    },
+    "silence": {
+      "state": "DEGRADED",
+      "color": "AMBER",
+      "enabled": 5,
+      "usable": 4,
+      "ratio": 0.8,
+      "affected": ["MSFT"],
+      "fresh_data": {
+        "enabled": 5,
+        "usable": 5,
+        "ratio": 1.0,
+        "affected": [],
+        "known": true
+      },
+      "trusted_decision": {
+        "enabled": 5,
+        "usable": 4,
+        "ratio": 0.8,
+        "affected": ["MSFT"],
+        "known": true
+      }
+    },
+    "delivery": {
+      "telegram": {
+        "configured": true,
+        "mode": "ACTIVE",
+        "last_attempt_at": "2026-08-12T03:25:40+00:00",
+        "last_success_at": "2026-08-12T03:25:40+00:00",
+        "success": true,
+        "error_code": null
+      },
+      "whatsapp": {
+        "configured": true,
+        "mode": "ACTIVE",
+        "last_attempt_at": "2026-08-12T03:25:42+00:00",
+        "last_success_at": "2026-08-12T03:25:42+00:00",
+        "success": true,
+        "error_code": null
+      },
+      "external_watcher": {
+        "configured": true,
+        "mode": "ACTIVE",
+        "last_attempt_at": "2026-08-12T03:26:00+00:00",
+        "last_success_at": "2026-08-12T03:26:00+00:00",
+        "success": true,
+        "error_code": null
+      }
+    }
+  },
+  "config": {
+    "revision": 12,
+    "assets": [
+      {
+        "symbol": "AAPL",
+        "name": "Apple",
+        "market": "US",
+        "color": "GREEN",
+        "enabled": true,
+        "evidence_coverage": 1.0,
+        "decision": "NONE",
+        "reason": "全部规则证据新鲜，当前无人工核验事项",
+        "observed_at": "2026-08-11T13:26:20+00:00",
+        "next_scan_at": "2026-08-12T13:25:00+00:00"
+      },
+      {
+        "symbol": "MSFT",
+        "name": "Microsoft",
+        "market": "US",
+        "color": "AMBER",
+        "enabled": true,
+        "evidence_coverage": 0.67,
+        "decision": "UNKNOWN",
+        "reason": "quote 能力退化，方向性结论已 fail closed",
+        "observed_at": "2026-08-11T13:26:24+00:00",
+        "next_scan_at": "2026-08-12T13:25:00+00:00"
+      },
+      {
+        "symbol": "NVDA",
+        "name": "NVIDIA",
+        "market": "US",
+        "color": "GREEN",
+        "enabled": true,
+        "evidence_coverage": 1.0,
+        "decision": "SELL_REVIEW",
+        "reason": "一项用户规则触发，仅请求人工复核，不是交易指令",
+        "observed_at": "2026-08-11T13:26:27+00:00",
+        "next_scan_at": "2026-08-12T13:25:00+00:00"
+      },
+      {
+        "symbol": "00700",
+        "name": "腾讯控股",
+        "market": "HK",
+        "color": "GREEN",
+        "enabled": true,
+        "evidence_coverage": 1.0,
+        "decision": "NONE",
+        "reason": "全部规则证据新鲜，当前无人工核验事项",
+        "observed_at": "2026-08-12T01:26:02+00:00",
+        "next_scan_at": "2026-08-13T01:25:00+00:00"
+      },
+      {
+        "symbol": "09988",
+        "name": "阿里巴巴-SW",
+        "market": "HK",
+        "color": "BLUE",
+        "enabled": true,
+        "evidence_coverage": 1.0,
+        "decision": "NONE",
+        "reason": "配置基线更新后正在积累恢复证据",
+        "observed_at": "2026-08-12T01:26:04+00:00",
+        "next_scan_at": "2026-08-13T01:25:00+00:00"
+      }
+    ],
+    "channels": {
+      "telegram": {
+        "label": "Telegram Bot",
+        "recipient_hint": "群组 ···· 4821"
+      },
+      "whatsapp": {
+        "label": "WhatsApp Cloud API",
+        "recipient_hint": "+86 ···· 7308"
+      },
+      "external_watcher": {
+        "label": "外部 Guardian Watcher",
+        "recipient_hint": "托管探针 ···· 09af"
+      }
+    },
+    "preferences": {
+      "timezone": "Asia/Shanghai",
+      "language": "zh-CN",
+      "launch_at_login": true,
+      "quiet_hours_enabled": true,
+      "quiet_hours_start": "23:00",
+      "quiet_hours_end": "07:30"
+    }
+  },
+  "incidents": {
+    "items": [
+      {
+        "id": "INC-0261",
+        "color": "AMBER",
+        "status": "OPEN",
+        "title": "US quote 能力退化",
+        "scope": "yfinance × quote × US",
+        "opened_at": "2026-08-11T13:25:42+00:00",
+        "updated_at": "2026-08-12T03:25:40+00:00",
+        "summary": "48 个真实调用样本的 Wilson 下界降至 83.21%，MSFT 的方向性判断已置为 UNKNOWN。",
+        "reason_codes": ["provider_degraded"],
+        "next_actions": [
+          "核验上游响应与系统时钟",
+          "保留 Cockpit 回执",
+          "等待下一次真实调用样本，不用缓存成功掩盖退化"
+        ]
+      },
+      {
+        "id": "INC-0254",
+        "color": "BLUE",
+        "status": "RESOLVED",
+        "title": "HK 配置基线已更新",
+        "scope": "market:HK",
+        "opened_at": "2026-08-11T01:25:00+00:00",
+        "updated_at": "2026-08-12T01:26:08+00:00",
+        "summary": "新标的责任范围已完成第一轮 post-epoch full scan，事故关闭；09988 仍展示恢复证据语义。",
+        "reason_codes": ["configuration_baseline_missing"],
+        "next_actions": [
+          "观察下一次预期扫描",
+          "确认 Guardian heartbeat 持续"
+        ]
+      },
+      {
+        "id": "INC-0249",
+        "color": "RED",
+        "status": "RESOLVED",
+        "title": "Guardian deadline 失联",
+        "scope": "global",
+        "opened_at": "2026-08-08T14:02:00+00:00",
+        "updated_at": "2026-08-08T14:29:31+00:00",
+        "summary": "一次 US full scan 超过 deadline，经过两次 distinct full scan 后恢复 GREEN。",
+        "reason_codes": ["deadline_missed"],
+        "next_actions": ["事故已关闭，无需人工修复账本"]
+      }
+    ]
+  },
+  "providers": {
+    "capabilities": [
+      {
+        "provider": "yfinance",
+        "operation": "quote",
+        "market": "US",
+        "sample_count": 48,
+        "success_rate": 0.9375,
+        "wilson_lower_bound": 0.8321,
+        "grade": "degraded",
+        "circuit_state": "closed",
+        "reasons": ["provider_degraded"]
+      },
+      {
+        "provider": "yfinance",
+        "operation": "fundamentals",
+        "market": "US",
+        "sample_count": 35,
+        "success_rate": 1.0,
+        "wilson_lower_bound": 0.9011,
+        "grade": "healthy",
+        "circuit_state": "closed",
+        "reasons": []
+      },
+      {
+        "provider": "eastmoney",
+        "operation": "quote",
+        "market": "HK",
+        "sample_count": 44,
+        "success_rate": 0.9773,
+        "wilson_lower_bound": 0.8821,
+        "grade": "healthy",
+        "circuit_state": "closed",
+        "reasons": []
+      },
+      {
+        "provider": "rss",
+        "operation": "news",
+        "market": "ALL",
+        "sample_count": 12,
+        "success_rate": 1.0,
+        "wilson_lower_bound": 0.7575,
+        "grade": "insufficient_data",
+        "circuit_state": "closed",
+        "reasons": ["insufficient_samples"]
+      }
+    ]
+  }
+}

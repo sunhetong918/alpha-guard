@@ -1,0 +1,134 @@
+{
+  "description": "Synthetic offline fixtures for Alpha Guard dry-run. Not market data.",
+  "evaluation_clock": "2026-01-02T14:30:00+00:00",
+  "snapshots": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "symbol": "AAPL",
+      "market": "US",
+      "name": "Apple Inc. (synthetic)",
+      "price": 160.0,
+      "pe_ttm": 20.0,
+      "pb": 8.0,
+      "roe": 25.0,
+      "provider": "synthetic-fixture",
+      "source": {
+        "price": "synthetic-fixture",
+        "pe_ttm": "synthetic-fixture",
+        "pb": "synthetic-fixture",
+        "roe": "synthetic-fixture"
+      },
+      "sources": {
+        "price": "synthetic-fixture",
+        "pe_ttm": "synthetic-fixture",
+        "pb": "synthetic-fixture",
+        "roe": "synthetic-fixture"
+      },
+      "field_metadata": {
+        "price": {
+          "provider": "synthetic-fixture",
+          "source_as_of": "2026-01-02T14:25:00+00:00",
+          "observed_at": "2026-01-02T14:25:00+00:00",
+          "time_basis": "source_event",
+          "timestamp_confidence": "provider_event",
+          "cache_state": "none"
+        },
+        "pe_ttm": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T14:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        },
+        "pb": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T14:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        },
+        "roe": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T14:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        }
+      },
+      "replay_evaluated_at": "2026-01-02T14:30:00+00:00",
+      "retrieved_at": "2026-01-02T14:25:00+00:00",
+      "as_of": "2026-01-02T14:25:00+00:00",
+      "currency": "USD",
+      "quality_issues": [
+        "synthetic_fixture:not_market_data"
+      ]
+    },
+    "00700": {
+      "ticker": "00700",
+      "symbol": "0700.HK",
+      "market": "HK",
+      "name": "Tencent Holdings (synthetic)",
+      "price": 430.0,
+      "pe_ttm": 32.0,
+      "pb": 4.0,
+      "roe": 18.0,
+      "provider": "synthetic-fixture",
+      "source": {
+        "price": "synthetic-fixture",
+        "pe_ttm": "synthetic-fixture",
+        "pb": "synthetic-fixture",
+        "roe": "synthetic-fixture"
+      },
+      "sources": {
+        "price": "synthetic-fixture",
+        "pe_ttm": "synthetic-fixture",
+        "pb": "synthetic-fixture",
+        "roe": "synthetic-fixture"
+      },
+      "field_metadata": {
+        "price": {
+          "provider": "synthetic-fixture",
+          "source_as_of": "2026-01-02T01:25:00+00:00",
+          "observed_at": "2026-01-02T01:25:00+00:00",
+          "time_basis": "source_event",
+          "timestamp_confidence": "provider_event",
+          "cache_state": "none"
+        },
+        "pe_ttm": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T01:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        },
+        "pb": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T01:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        },
+        "roe": {
+          "provider": "synthetic-fixture",
+          "source_as_of": null,
+          "observed_at": "2026-01-02T01:25:00+00:00",
+          "time_basis": "observed_only",
+          "timestamp_confidence": "observed_only",
+          "cache_state": "none"
+        }
+      },
+      "replay_evaluated_at": "2026-01-02T01:30:00+00:00",
+      "retrieved_at": "2026-01-02T01:25:00+00:00",
+      "as_of": "2026-01-02T01:25:00+00:00",
+      "currency": "HKD",
+      "quality_issues": [
+        "synthetic_fixture:not_market_data"
+      ]
+    }
+  }
+}

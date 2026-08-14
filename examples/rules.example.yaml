@@ -1,0 +1,67 @@
+# Example only. Instruments are deliberately disabled until reviewed.
+reliability:
+  freshness:
+    future_tolerance_seconds: 300.0
+    fields:
+      price:
+        max_source_age_seconds: 1800.0
+        max_observation_age_seconds: 900.0
+        aging_ratio: 0.8
+        allow_observed_only: false
+        session_aware: true
+      pe_ttm:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+      pb:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+      roe:
+        max_source_age_seconds: null
+        max_observation_age_seconds: 86400.0
+        aging_ratio: 0.8
+        allow_observed_only: true
+        session_aware: false
+  provider:
+    request_timeout_seconds: 10.0
+    bulkhead_max_calls: 4
+    max_attempts: 3
+    base_backoff_seconds: 0.25
+    max_backoff_seconds: 4.0
+    max_retry_after_seconds: 60.0
+    failure_threshold: 3
+    open_seconds: 300.0
+    half_open_max_calls: 1
+    fresh_cache_seconds: 300.0
+    stale_if_error_seconds: 86400.0
+    observation_limit: 100
+
+watchlist:
+  AAPL:
+    name: "Apple Inc."
+    market: US
+    currency: USD
+    enabled: false
+    cost_basis: 175.0
+    alert_cooldown_hours: 24.0
+    sell_rules:
+      - id: aapl-price-upper-review
+        type: price_above
+        value: 220.0
+        note: "Review the provider quote and timestamp."
+      - id: aapl-cost-drawdown-review
+        type: price_drop_pct
+        value: 15.0
+        note: "Review cost basis and quote quality."
+    buy_rules:
+      - id: aapl-price-lower-review
+        type: price_below
+        value: 165.0
+      - id: aapl-pe-lower-review
+        type: pe_below
+        value: 25.0
