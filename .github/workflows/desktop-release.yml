@@ -198,6 +198,7 @@ jobs:
             --target-architecture arm64 \
             --osx-bundle-identifier com.alpha-guard.desktop \
             --name AlphaGuard-Desktop \
+            --icon "desktop/assets/AlphaGuard.icns" \
             --hidden-import PySide6.QtNetwork \
             --collect-all keyring \
             --add-data "desktop/ui/fixtures/guardian.json:desktop/ui/fixtures" \

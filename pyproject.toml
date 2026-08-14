@@ -81,6 +81,7 @@ include = [
 
 [tool.setuptools.package-data]
 data = ["fixtures/*.json"]
+desktop = ["assets/*.icns", "assets/*.png"]
 "desktop.ui" = ["fixtures/*.json"]
 news = ["config.yaml"]
 signals = ["rules.yaml"]

@@ -100,6 +100,8 @@ def test_wheel_contains_runtime_modules_and_packages(built_wheel: Path) -> None:
         "config.py",
         "desktop/__init__.py",
         "desktop/app.py",
+        "desktop/assets/AlphaGuard.icns",
+        "desktop/assets/alpha-guard-icon-master.png",
         "desktop/ui/__init__.py",
         "desktop/ui/app.py",
         "desktop/ui/fixtures/guardian.json",
@@ -163,6 +165,7 @@ def test_native_release_freezes_installed_wheel_not_editable_checkout() -> None:
     assert 'assert "archive_info" in metadata' in workflow
     assert "is_relative_to(environment)" in workflow
     assert "uv run --no-sync pyinstaller" in workflow
+    assert '--icon "desktop/assets/AlphaGuard.icns"' in workflow
     assert re.search(r"uv run(?! --no-sync) pyinstaller", workflow) is None
     assert (
         "dist/AlphaGuard-Desktop.app/Contents/MacOS/AlphaGuard-Desktop --help"
