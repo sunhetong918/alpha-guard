@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "akshare"
-version = "1.18.83"
+version = "1.18.84"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "akracer", marker = "sys_platform == 'linux'" },
@@ -41,9 +41,9 @@ dependencies = [
     { name = "urllib3" },
     { name = "xlrd" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ba/43/cb48ff53aa9cd8d44ec26bca6cd828d24347d9cab97cc0d780e303ad76c6/akshare-1.18.83.tar.gz", hash = "sha256:0c81d229d08a2c240a10ff606680a6a449eecdc63df0d70c7d7f0547c2d6230f", size = 895826, upload-time = "2026-08-07T03:45:03.219Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/db/2a/89faf960ede50c295b7eb15b9005503b778fe75e6b64aba58d3cb1828f48/akshare-1.18.84.tar.gz", hash = "sha256:0590a23db87b7f3a9a7afa8e4639e4c165b01719729b666d7fe608a08df3de26", size = 896245, upload-time = "2026-08-10T08:26:48.048Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/d6/b186bad8ab6903ad3fc99803d5f6ce6783f246e5c04d0714e72562d5bdeb/akshare-1.18.83-py3-none-any.whl", hash = "sha256:ebeea4910567dcfacca4cc2cc38d7f445d52bf8ea5852f3360327839443cc0cd", size = 1119739, upload-time = "2026-08-07T03:45:01.621Z" },
+    { url = "https://files.pythonhosted.org/packages/04/5d/8b9b52f8f80e623276597050d78cb6cc26f83bcbe3e5c5f8810267642c44/akshare-1.18.84-py3-none-any.whl", hash = "sha256:3919e1d6297a8ef65b16171163b61ee77b4c509111fb5f816be76660235a08df", size = 1119965, upload-time = "2026-08-10T08:26:46.422Z" },
 ]
 
 [[package]]
@@ -102,8 +102,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "akshare", marker = "extra == 'all'", specifier = ">=1.14.0" },
-    { name = "akshare", marker = "extra == 'cn-data'", specifier = ">=1.14.0" },
+    { name = "akshare", marker = "extra == 'all'", specifier = ">=1.18.84" },
+    { name = "akshare", marker = "extra == 'cn-data'", specifier = ">=1.18.84" },
     { name = "anthropic", marker = "extra == 'ai'", specifier = ">=0.40.0" },
     { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.40.0" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
@@ -111,7 +111,7 @@ requires-dist = [
     { name = "keyring", marker = "extra == 'all'", specifier = ">=25,<26" },
     { name = "keyring", marker = "extra == 'desktop'", specifier = ">=25,<26" },
     { name = "pandas", specifier = ">=2.0.0" },
-    { name = "platformdirs", specifier = ">=4.0.0" },
+    { name = "platformdirs", specifier = ">=4.11.2" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "pyinstaller", marker = "extra == 'desktop-build'", specifier = "==6.21.0" },
     { name = "pyside6", marker = "extra == 'all'", specifier = ">=6.8,<7" },
@@ -413,7 +413,7 @@ name = "cryptography"
 version = "50.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/de/41/6cbdcf9142d00fe82836fbb51e503e58088575cf7a0fe1dbff6695bf0840/cryptography-50.0.0.tar.gz", hash = "sha256:eeac2acb5a20ed25e0ad6d1df9891a520b78b404266b6d11778f25d5d691a6c9", size = 880201, upload-time = "2026-07-31T14:25:10.11Z" }
 wheels = [
@@ -587,7 +587,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
@@ -816,7 +816,7 @@ name = "macholib"
 version = "1.16.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "altgraph", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "altgraph" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362", size = 59427, upload-time = "2025-11-22T08:28:38.373Z" }
 wheels = [
@@ -1060,11 +1060,11 @@ wheels = [
 
 [[package]]
 name = "platformdirs"
-version = "4.11.1"
+version = "4.11.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/36/0a/062135c9a98dac804265073cc3afdbec5ae1aa37980bb354f461bafe81b4/platformdirs-4.11.1.tar.gz", hash = "sha256:bb1af68078f25e2f3e111e2d43b8d536df41b73c8a684b40bb018223b66fae27", size = 32396, upload-time = "2026-08-07T23:06:48.516Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e5/98/0bf930c4f97d0266b58a89e36c015f56232c52b5d2f207215d48cca9e8f7/platformdirs-4.11.2.tar.gz", hash = "sha256:3a2ae5fca3520a01ab1be8b45613537f52ddf5b5f6f53d88233892dfbf0cd82d", size = 32716, upload-time = "2026-08-10T15:48:06.092Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/85/9b31b44296cfa3bb56cddb35e6a0f6578bab0b490c0806c0245e32c6110c/platformdirs-4.11.1-py3-none-any.whl", hash = "sha256:2efd27d363e8dd2e661639ffb398865a5e0a46442a11d266bf375a0e0c10e386", size = 23261, upload-time = "2026-08-07T23:06:47.219Z" },
+    { url = "https://files.pythonhosted.org/packages/49/e2/4e6eee633809c376c024821b91ade709cbfd040ec53939ffbcc292aa7eee/platformdirs-4.11.2-py3-none-any.whl", hash = "sha256:7f89089b6ea71bda7962953edcf784b2e2d9d285b40ad88be2bb75c6e9d82ab4", size = 23361, upload-time = "2026-08-10T15:48:04.855Z" },
 ]
 
 [[package]]
@@ -1467,8 +1467,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
