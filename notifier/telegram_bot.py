@@ -310,6 +310,41 @@ async def send_news_alert(
     )
 
 
+def render_trade_alert(record: Mapping[str, Any]) -> str:
+    """Render one guarded trading outcome (submission, skip or denial)."""
+
+    intent = record.get("intent") if isinstance(record.get("intent"), Mapping) else {}
+    outcome = record.get("outcome") if isinstance(record.get("outcome"), Mapping) else {}
+    ticker = _escaped(intent.get("ticker", "?"), 32, empty="?")
+    side = _escaped(intent.get("side", "?"), 8, empty="?")
+    quantity = _escaped(intent.get("quantity", "?"), 12, empty="?")
+    limit_price = _escaped(intent.get("limit_price", "?"), 24, empty="?")
+    currency = _escaped(intent.get("currency", ""), 8, empty="")
+    mode = _escaped(outcome.get("mode") or record.get("mode") or "dry", 8, empty="dry")
+    status = _escaped(outcome.get("status", "denied"), 24, empty="denied")
+    broker_order_id = _escaped(outcome.get("broker_order_id") or "无", 64, empty="无")
+    reasons = _render_quality(record.get("guard_reasons", []))
+    decision = _escaped(intent.get("decision", "?"), 24, empty="?")
+    snapshot_as_of = _escaped(record.get("snapshot_as_of") or "未提供", 150)
+
+    mode_marker = "🟣 DRY" if mode == "dry" else "🔴 LIVE"
+    lines = [
+        f"<b>Alpha Guard 交易事件 {mode_marker}</b>",
+        "",
+        f"标的：<code>{ticker}</code>",
+        f"方向：<b>{_escaped(side.upper(), 8)}</b> × 数量：<code>{quantity}</code>",
+        f"限价：<code>{limit_price} {currency}</code>",
+        f"触发决策：<code>{decision}</code>",
+        f"结果：<b>{status}</b>（券商单号 <code>{broker_order_id}</code>）",
+        f"快照时间：{snapshot_as_of}",
+        f"风控裁决：{'通过' if record.get('guard_allowed') else '驳回'}",
+    ]
+    if reasons:
+        lines.append(f"原因：{reasons}")
+    message = "\n".join(lines)
+    return _bounded_operational_message(message, state="TRADE", scope=ticker)
+
+
 async def _send_html(
     text: str,
     *,
@@ -487,6 +522,7 @@ __all__ = [
     "render_incident_alert",
     "render_signal",
     "render_signal_alert",
+    "render_trade_alert",
     "send_message",
     "send_incident",
     "send_news_alert",

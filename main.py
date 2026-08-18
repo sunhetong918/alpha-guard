@@ -32,6 +32,7 @@ from config import (
     RulesConfig,
     Settings,
     get_settings,
+    load_futu_config,
     load_news_config,
     load_rules_config,
 )
@@ -3207,6 +3208,7 @@ def validate() -> None:
     try:
         rules = load_rules_config()
         news = load_news_config()
+        futu_config = load_futu_config()
         settings = get_settings()
         enabled = sum(item.enabled for item in rules.watchlist.values())
         enabled_sources = [
@@ -3220,7 +3222,8 @@ def validate() -> None:
             f"新闻源：{', '.join(enabled_sources) if enabled_sources else '全部禁用'}；"
             f"AI 筛选：{'启用' if news.ai_filter.enabled else '禁用'}；"
             f"外发通知：{'启用' if settings.notifications_enabled else '禁用'}；"
-            f"Heartbeat：{'启用' if settings.heartbeat_enabled else '禁用'}"
+            f"Heartbeat：{'启用' if settings.heartbeat_enabled else '禁用'}；"
+            f"Futu 交易：{'启用（' + futu_config.mode + '）' if futu_config.enabled else '禁用'}"
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         _handle_failure(exc)
@@ -3256,6 +3259,10 @@ def doctor(
         table.add_row(
             "Anthropic SDK",
             _dependency_status("anthropic", enabled=news.ai_filter.enabled),
+        )
+        table.add_row(
+            "Futu SDK",
+            _dependency_status("futu", enabled=get_settings().futu_enabled),
         )
         table.add_row(
             "Telegram SDK",
@@ -3318,6 +3325,70 @@ def dry_run(
                 "[yellow]离线演练：数据为合成样例，不代表真实市场行情。[/yellow]"
             )
             _print_scan(outcome)
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        _handle_failure(exc)
+
+
+@app.command("trade")
+def trade(
+    fixture: Annotated[
+        Path,
+        typer.Option(
+            "--fixture",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+            help="离线快照 JSON；默认使用仓库内合成样例。",
+        ),
+    ] = DEFAULT_FIXTURE_PATH,
+) -> None:
+    """离线演练交易链：规则→决策→风控→订单意图；不联网、不下单。"""
+
+    try:
+        from signals.engine import evaluate
+        from trading import DryRunBroker, TradingExecutor
+        from trading.models import TradeAuditRecord
+
+        futu_config = load_futu_config()
+        snapshots = _load_fixture(fixture)
+        executor = TradingExecutor(futu_config, DryRunBroker())
+        rules_snapshot = _rules_snapshot(load_rules_config())
+        records: list[TradeAuditRecord] = []
+        for ticker, snapshot in snapshots.items():
+            evaluation = evaluate(ticker, snapshot, rules_snapshot)
+            record = executor.execute(evaluation, snapshot)
+            if record is not None:
+                records.append(record)
+        console.print(
+            "[yellow]离线交易演练：不联网、不连接 OpenD、不发送任何订单。[/yellow]"
+        )
+        if not records:
+            console.print("没有标的触发可执行的交易策略；未产生订单意图。")
+            return
+        table = Table(title="交易演练审计")
+        table.add_column("标的")
+        table.add_column("方向")
+        table.add_column("数量")
+        table.add_column("限价")
+        table.add_column("风控")
+        table.add_column("结果")
+        for record in records:
+            outcome = record.outcome
+            table.add_row(
+                record.intent.ticker,
+                record.intent.side.upper(),
+                str(record.intent.quantity),
+                f"{record.intent.limit_price} {record.intent.currency}".strip(),
+                "通过" if record.guard_allowed else "驳回",
+                outcome.status if outcome else "denied",
+            )
+        console.print(table)
+        for record in records:
+            console.print(
+                f"驳回原因 {record.intent.ticker}: "
+                + ", ".join(record.guard_reasons)
+            )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         _handle_failure(exc)
 

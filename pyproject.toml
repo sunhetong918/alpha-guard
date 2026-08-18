@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 ai = ["anthropic>=0.40.0"]
 cn-data = ["akshare>=1.14.0"]
+futu = ["futu-api>=9.0"]
 notifications = ["python-telegram-bot>=21.0"]
 desktop = [
     "PySide6>=6.8,<7",
@@ -30,6 +31,7 @@ desktop-build = ["PyInstaller==6.21.0"]
 all = [
     "akshare>=1.14.0",
     "anthropic>=0.40.0",
+    "futu-api>=9.0",
     "keyring>=25,<26",
     "PySide6>=6.8,<7",
     "python-telegram-bot>=21.0",
@@ -77,6 +79,7 @@ include = [
     "reliability*",
     "signals*",
     "state*",
+    "trading*",
 ]
 
 [tool.setuptools.package-data]
@@ -85,6 +88,7 @@ desktop = ["assets/*.icns", "assets/*.png"]
 "desktop.ui" = ["fixtures/*.json"]
 news = ["config.yaml"]
 signals = ["rules.yaml"]
+trading = ["futu.yaml"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
@@ -106,6 +110,7 @@ source = [
     "scheduler",
     "signals",
     "state",
+    "trading",
 ]
 
 [tool.ruff]

@@ -36,6 +36,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised through _require_provider
     yf = None
 
+from data.futu_provider import FutuQuote
+
 
 _MISSING_STRINGS = {"", "-", "--", "n/a", "na", "nan", "none", "null"}
 _T = TypeVar("_T")
@@ -580,6 +582,34 @@ def _ak_as_of(row: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def _find_futu_quote(
+    local_code: str,
+    issues: list[str],
+    *,
+    runtime: ProviderRuntime | None,
+    attempts: list[ProviderAttempt],
+) -> "FutuQuote | None":
+    """Try the opt-in Futu realtime source; never raises, records issues."""
+
+    from data import futu_provider
+
+    if not futu_provider.quote_available():
+        return None
+    from config import get_settings
+
+    settings = get_settings()
+    quote, futu_attempts = futu_provider.fetch_hk_quote(
+        local_code,
+        host=settings.futu_opend_host,
+        port=settings.futu_opend_quote_port,
+        runtime=runtime,
+    )
+    attempts.extend(futu_attempts)
+    if quote is None:
+        _add_issue(issues, "futu:quote_not_available")
+    return quote
+
+
 def get_hk_stock(
     ticker: str,
     *,
@@ -588,8 +618,9 @@ def get_hk_stock(
 ) -> dict[str, Any]:
     """Fetch a normalized HK stock snapshot.
 
-    AKShare is used only as an optional quote/name source. Fundamentals and the
-    one-year history always come from the canonical yfinance symbol.
+    Futu (opt-in, via OpenD) is the preferred realtime price source; AKShare
+    remains the offline-safe fallback. Fundamentals and the one-year history
+    always come from the canonical yfinance symbol.
     """
 
     yfinance = _require_provider(yf, "yfinance")
@@ -618,43 +649,76 @@ def get_hk_stock(
     provider_attempts.extend(history_attempts)
     fields = _base_yfinance_fields(info, hist, issues)
 
-    quote, quote_observed_at, quote_cache = _find_hk_quote(
+    futu_quote = _find_futu_quote(
         local_code,
         issues,
         runtime=provider_runtime,
         attempts=provider_attempts,
     )
-    ak_price = _to_finite_float(quote.get("最新价")) if quote else None
-    if ak_price is not None and ak_price > 0:
-        fields["price"] = ak_price
-        price_source = "akshare"
-        # Remove a yfinance price issue when AKShare supplied a usable quote.
-        issues[:] = [issue for issue in issues if not issue.startswith("price:")]
-    else:
-        price_source = "yfinance"
-        if quote and ak_price is not None and ak_price <= 0:
-            _add_issue(issues, "akshare_price:non_positive")
-        elif quote:
-            _add_issue(issues, "akshare_price:missing_or_non_finite")
 
-    ak_name = str(quote.get("名称") or "").strip() if quote else ""
-    name = ak_name or str(info.get("longName") or info.get("shortName") or local_code)
-    name_source = "akshare" if ak_name else "yfinance"
+    if futu_quote is not None:
+        fields["price"] = futu_quote.price
+        price_source = "futu"
+        price_as_of = futu_quote.source_as_of
+        price_observed_at = futu_quote.observed_at
+        price_cache = CacheState.NONE
+        issues[:] = [issue for issue in issues if not issue.startswith("price:")]
+        futu_name = futu_quote.name
+    else:
+        futu_name = ""
+
+    if futu_quote is None:
+        quote, quote_observed_at, quote_cache = _find_hk_quote(
+            local_code,
+            issues,
+            runtime=provider_runtime,
+            attempts=provider_attempts,
+        )
+        ak_price = _to_finite_float(quote.get("最新价")) if quote else None
+        if ak_price is not None and ak_price > 0:
+            fields["price"] = ak_price
+            price_source = "akshare"
+            # Remove a yfinance price issue when AKShare supplied a usable quote.
+            issues[:] = [issue for issue in issues if not issue.startswith("price:")]
+        else:
+            price_source = "yfinance"
+            if quote and ak_price is not None and ak_price <= 0:
+                _add_issue(issues, "akshare_price:non_positive")
+            elif quote:
+                _add_issue(issues, "akshare_price:missing_or_non_finite")
+
+        ak_name = str(quote.get("名称") or "").strip() if quote else ""
+        price_as_of = (
+            _ak_as_of(quote)
+            if price_source == "akshare"
+            else _as_of_from_info(info)
+        )
+        price_observed_at = (
+            quote_observed_at
+            if price_source == "akshare" and quote_observed_at is not None
+            else info_observed_at
+        )
+        price_cache = quote_cache if price_source == "akshare" else info_cache
+    else:
+        ak_name = ""
+
+    name = (
+        futu_name
+        or ak_name
+        or str(info.get("longName") or info.get("shortName") or local_code)
+    )
+    name_source = (
+        "futu"
+        if futu_name
+        else ("akshare" if ak_name else "yfinance")
+    )
     sources = _field_sources("yfinance")
     sources.update({"name": name_source, "price": price_source})
-    provider = "akshare+yfinance" if quote else "yfinance"
+    if futu_quote is not None:
+        provider = "futu+yfinance"
+    else:
+        provider = "akshare+yfinance" if price_source == "akshare" else "yfinance"
     retrieved_at = _utc_now_iso()
-    price_as_of = (
-        _ak_as_of(quote)
-        if price_source == "akshare"
-        else _as_of_from_info(info)
-    )
-    price_observed_at = (
-        quote_observed_at
-        if price_source == "akshare" and quote_observed_at is not None
-        else info_observed_at
-    )
-    price_cache = quote_cache if price_source == "akshare" else info_cache
     field_metadata = _core_field_metadata(
         sources,
         price_source_as_of=price_as_of,

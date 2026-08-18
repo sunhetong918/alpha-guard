@@ -30,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 ROOT_DIR = PROJECT_ROOT
 RULES_CONFIG_PATH = PROJECT_ROOT / "signals" / "rules.yaml"
 NEWS_CONFIG_PATH = PROJECT_ROOT / "news" / "config.yaml"
+TRADING_CONFIG_PATH = PROJECT_ROOT / "trading" / "futu.yaml"
 ENV_PATH = PROJECT_ROOT / ".env"
 MOBILE_TRUST_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60
 
@@ -354,6 +355,42 @@ class NewsConfig(StrictModel):
         return self
 
 
+class AutoTradeInstrumentConfig(StrictModel):
+    """Per-instrument auto-trade policy; defaults are deliberately narrow."""
+
+    side: Literal["buy", "sell"]
+    quantity: int = Field(ge=1, le=100_000)
+    order_type: Literal["limit"] = "limit"
+    limit_offset_pct: float = Field(
+        default=0.5, ge=0, le=10, allow_inf_nan=False
+    )
+    max_orders_per_day: int = Field(default=1, ge=1, le=50)
+    cooldown_minutes: int = Field(default=60, ge=1, le=10_080)
+
+
+class FutuTradingConfig(StrictModel):
+    """Futu trading configuration; every path stays off unless enabled."""
+
+    enabled: bool = False
+    mode: Literal["dry", "live"] = "dry"
+    confirm_live: bool = False
+    auto_trade: dict[StableId, AutoTradeInstrumentConfig] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def validate_live_safety(self) -> Self:
+        if self.mode == "live":
+            if not self.confirm_live:
+                raise ValueError(
+                    "mode 'live' requires confirm_live: true as an explicit "
+                    "human acknowledgement"
+                )
+            if not self.auto_trade:
+                raise ValueError("mode 'live' requires at least one auto_trade entry")
+        return self
+
+
 class Settings(BaseSettings):
     """Runtime secrets and feature switches loaded from the environment."""
 
@@ -464,6 +501,25 @@ class Settings(BaseSettings):
         gt=0,
         le=30,
         allow_inf_nan=False,
+    )
+    futu_enabled: bool = Field(default=False, validation_alias="FUTU_ENABLED")
+    futu_opend_host: str = Field(
+        default="127.0.0.1",
+        validation_alias="FUTU_OPEND_HOST",
+        min_length=1,
+        max_length=253,
+    )
+    futu_opend_quote_port: int = Field(
+        default=11111,
+        validation_alias="FUTU_OPEND_QUOTE_PORT",
+        ge=1,
+        le=65_535,
+    )
+    futu_opend_trade_port: int = Field(
+        default=11111,
+        validation_alias="FUTU_OPEND_TRADE_PORT",
+        ge=1,
+        le=65_535,
     )
 
     @field_validator(
@@ -598,6 +654,13 @@ def load_news_config(path: str | Path | None = None) -> NewsConfig:
     return NewsConfig.model_validate(data)
 
 
+def load_futu_config(path: str | Path | None = None) -> FutuTradingConfig:
+    """Load and validate the Futu trading YAML relative to the repo root."""
+
+    data = _load_yaml(path or TRADING_CONFIG_PATH)
+    return FutuTradingConfig.model_validate(data)
+
+
 def _root_relative_path(path: str | Path) -> Path:
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
@@ -629,6 +692,9 @@ __all__ = [
     "FreshnessConfig",
     "FreshnessField",
     "FreshnessFieldConfig",
+    "AutoTradeInstrumentConfig",
+    "FutuTradingConfig",
+    "TRADING_CONFIG_PATH",
     "InstrumentConfig",
     "KeywordGroups",
     "MacroTopicConfig",
@@ -645,6 +711,7 @@ __all__ = [
     "Settings",
     "WhatsAppTemplateName",
     "get_settings",
+    "load_futu_config",
     "load_news_config",
     "load_rules_config",
 ]

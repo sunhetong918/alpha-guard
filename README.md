@@ -6,7 +6,7 @@ Alpha Guard 把用户预先写下的价格、估值和质量规则转换为可�
 
 > **安全默认值**：依赖安装完成后，刚克隆的仓库在运行时默认离线，不访问市场或新闻数据源，也不发送 Telegram、WhatsApp 或 heartbeat。示例标的、新闻源、AI 过滤、真实通知和外部 watcher 全部关闭，必须逐层显式启用。`uv sync` 本身仍需从软件包仓库下载依赖。
 
-Alpha Guard 不是荐股软件，也不是自动交易机器人：不连接券商、不接收交易凭据、不暴露下单接口、不承诺收益。所有输出都是“人工核验提醒”，系统未执行任何交易，也不构成投资建议。
+Alpha Guard 不是荐股软件，不承诺收益。券商连接是**可选且默认关闭的**：通过 Futu OpenAPI 集成（需 `--extra futu`、运行中的 OpenD 网关、显式配置三层开关）可启用实时行情与规则触发的自动下单，默认以 dry-run 模式只审计不下单；`live` 模式额外要求 `confirm_live: true` 人工确认。未启用时系统完全离线于券商，所有输出仍是“人工核验提醒”。一切输出均不构成投资建议。
 
 ## 为什么是“证据优先”
 
@@ -55,6 +55,9 @@ uv sync --frozen --extra ai
 # AKShare 港股报价与中文新闻
 uv sync --frozen --extra cn-data
 
+# Futu OpenAPI 实时行情与自动交易（可选，默认关闭）
+uv sync --frozen --extra futu
+
 # 一次安装全部可选能力
 uv sync --frozen --extra all
 ```
@@ -93,13 +96,27 @@ uv run alpha-guard validate
 
 这只修正本地虚拟环境的文件标志，不改项目数据；也可以直接使用上面的 `uv run python main.py ...` 等价入口。
 
+## Futu OpenAPI 集成（可选，默认关闭）
+
+Futu 集成提供两件事：**港股实时行情**（作为 AKShare 之外的首选价格源）与**规则触发的自动交易**。安全边界如下：
+
+- 三层开关缺一不可：`uv sync --frozen --extra futu` 安装 SDK、`.env` 中 `FUTU_ENABLED=true`、`trading/futu.yaml` 中 `enabled: true`。
+- 交易默认 `mode: dry`：订单意图、风控裁决与限价全部正常计算并写入审计，但**不发送任何真实订单**。
+- `mode: live` 必须同时写 `confirm_live: true`，并至少配置一个 `auto_trade` 标的；配置校验会在扫描前拒绝不满足条件的安全违规。
+- 风控闸（`trading/guard.py`）只在决策为 `BUY_REVIEW`/`SELL_REVIEW` 且方向与配置一致、价格可用、未触达单日限额与冷却时放行；`UNKNOWN`/`CONFLICT` 永不下单。
+- 每笔订单（含被驳回的）都会产生不可变审计记录，并可经 `render_trade_alert` 推送到 Telegram/WhatsApp。
+- 使用 `alpha-guard trade` 可完全离线地演练整条交易链。
+
+运行交易需要本机 [OpenD](https://www.futunn.com/openAPI) 网关与开通 OpenAPI 权限的富途账户；行情与交易权限以富途官方为准。
+
 ## 命令
 
 | 命令 | 用途 | 默认联网 | 默认通知 |
 |---|---|---:|---:|
-| `validate` | 严格解析 `signals/rules.yaml` 与 `news/config.yaml` | 否 | 否 |
+| `validate` | 严格解析 `signals/rules.yaml`、`news/config.yaml` 与 `trading/futu.yaml` | 否 | 否 |
 | `doctor` | 诊断配置、可选密钥、SQLite 和下次调度时间 | 否 | 否 |
 | `dry-run` | 用固定数据演练规则、证据和消息渲染 | 否 | 否 |
+| `trade` | 离线演练交易链：规则→决策→风控→订单意图；不下单 | 否 | 否 |
 | `scan` | 单次扫描已启用的港股/美股标的；默认仅在终端预览 | 有启用标的时 | 否；需 `--notify` + 环境开关 |
 | `news` | 单次扫描已启用的新闻源；默认仅在终端预览 | 有启用来源时 | 否；需 `--notify` + 环境开关 |
 | `run` | 启动交易日历感知的长期调度器；默认预览模式 | 有启用任务时 | 否；需 `--notify` + 环境开关 |
