@@ -3394,6 +3394,95 @@ def trade(
 
 
 @app.command()
+def rank(
+    tickers: Annotated[
+        str | None,
+        typer.Option(
+            "--tickers",
+            help="逗号分隔的标的列表（如 AAPL,00700）；默认使用已启用的 watchlist。",
+        ),
+    ] = None,
+    fixture: Annotated[
+        Path | None,
+        typer.Option(
+            "--fixture",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+            help="离线快照 JSON；提供时完全不联网。",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="输出机器可读 JSON。")
+    ] = False,
+) -> None:
+    """研究评分榜：按证据优先的基本面评分对标的排序；不构成投资建议。"""
+
+    try:
+        from analysis.scorer import analyze
+
+        snapshots: dict[str, dict[str, Any]] = {}
+        if fixture is not None:
+            snapshots = _load_fixture(fixture)
+        else:
+            rules = load_rules_config()
+            if tickers:
+                wanted = [item.strip() for item in tickers.split(",") if item.strip()]
+            else:
+                wanted = [
+                    ticker
+                    for ticker, item in rules.watchlist.items()
+                    if item.enabled
+                ]
+            if not wanted:
+                console.print(
+                    "[yellow]没有待评分标的；用 --tickers 指定或在 rules.yaml 启用标的。[/yellow]"
+                )
+                return
+            for ticker in wanted:
+                market = "HK" if ticker.isdigit() or ticker.upper().endswith(".HK") else "US"
+                snapshots[ticker] = get_stock(ticker, market)
+
+        ranked = sorted(
+            (analyze(snapshot) for snapshot in snapshots.values()),
+            key=lambda item: item.get("total_score", 0),
+            reverse=True,
+        )
+        if json_output:
+            _json_dump(ranked)
+            return
+        console.print(
+            "[yellow]研究评分榜：描述性基本面评分，不构成投资建议或买卖推荐。[/yellow]"
+        )
+        table = Table(title="Alpha Guard 研究评分榜")
+        table.add_column("排名")
+        table.add_column("标的")
+        table.add_column("名称")
+        table.add_column("评分")
+        table.add_column("覆盖率")
+        table.add_column("置信度")
+        table.add_column("结论", overflow="fold")
+        for position, item in enumerate(ranked, start=1):
+            table.add_row(
+                str(position),
+                str(item.get("ticker")),
+                str(item.get("name")),
+                f"{item.get('total_score')}/100",
+                f"{item.get('coverage_pct', 0)}%",
+                str(item.get("confidence")),
+                str(item.get("verdict")),
+            )
+        console.print(table)
+        console.print(
+            "⚠️ 评分为证据优先的描述性研究输出；数据覆盖不足时评分不可解释。"
+            "请核对原始披露后再做任何决定。"
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        _handle_failure(exc)
+
+
+@app.command()
 def scan(
     market: Annotated[
         str | None, typer.Option("--market", help="只扫描 US 或 HK 市场。")
