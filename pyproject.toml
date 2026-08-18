@@ -8,19 +8,19 @@ dependencies = [
     "apscheduler>=3.11,<4",
     "exchange-calendars>=4.11,<5",
     "pandas>=2.0.0",
-    "platformdirs>=4.0.0",
+    "platformdirs>=4.11.3",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "requests>=2.31.0",
     "rich>=13.9.0",
     "typer>=0.15.0",
-    "yfinance>=0.2.40",
+    "yfinance>=1.6.0",
 ]
 
 [project.optional-dependencies]
-ai = ["anthropic>=0.40.0"]
-cn-data = ["akshare>=1.14.0"]
+ai = ["anthropic>=0.122.0"]
+cn-data = ["akshare>=1.18.91"]
 futu = ["futu-api>=9.0"]
 notifications = ["python-telegram-bot>=21.0"]
 desktop = [
@@ -29,8 +29,8 @@ desktop = [
 ]
 desktop-build = ["PyInstaller==6.21.0"]
 all = [
-    "akshare>=1.14.0",
-    "anthropic>=0.40.0",
+    "akshare>=1.18.91",
+    "anthropic>=0.122.0",
     "futu-api>=9.0",
     "keyring>=25,<26",
     "PySide6>=6.8,<7",
