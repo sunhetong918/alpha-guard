@@ -3416,10 +3416,32 @@ def rank(
     json_output: Annotated[
         bool, typer.Option("--json", help="输出机器可读 JSON。")
     ] = False,
+    notify: Annotated[
+        bool,
+        typer.Option(
+            "--notify",
+            help="与上次评分对比，把显著变化推送到 Telegram（需通知开关）。",
+        ),
+    ] = False,
+    delta_threshold: Annotated[
+        float,
+        typer.Option(
+            "--delta-threshold",
+            min=1,
+            max=100,
+            help="判定显著变化的最小评分差（绝对值）。",
+        ),
+    ] = 5.0,
 ) -> None:
     """研究评分榜：按证据优先的基本面评分对标的排序；不构成投资建议。"""
 
     try:
+        from analysis.history import (
+            load_scores,
+            render_score_changes,
+            save_scores,
+            score_changes,
+        )
         from analysis.scorer import analyze
 
         snapshots: dict[str, dict[str, Any]] = {}
@@ -3449,6 +3471,25 @@ def rank(
             key=lambda item: item.get("total_score", 0),
             reverse=True,
         )
+
+        if notify:
+            previous = load_scores()
+            changes = score_changes(
+                previous, ranked, threshold=delta_threshold
+            )
+            if changes:
+                from notifier.telegram_bot import send_message
+
+                settings = get_settings()
+                _require_notifications(settings)
+                asyncio.run(send_message(render_score_changes(changes), settings))
+                console.print(
+                    f"[green]已推送 {len(changes)} 条评分变化到 Telegram。[/green]"
+                )
+            else:
+                console.print("没有评分变化达到推送阈值。")
+            save_scores({str(item["ticker"]): item for item in ranked})
+
         if json_output:
             _json_dump(ranked)
             return
@@ -3478,6 +3519,92 @@ def rank(
             "⚠️ 评分为证据优先的描述性研究输出；数据覆盖不足时评分不可解释。"
             "请核对原始披露后再做任何决定。"
         )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        _handle_failure(exc)
+
+
+@app.command()
+def screen(
+    market: Annotated[
+        str,
+        typer.Option("--market", help="HK 或 US；HK 全市场按市值取前 N。"),
+    ] = "HK",
+    top: Annotated[
+        int, typer.Option("--top", help="从全市场取市值前 N 名构建标的池。", min=1, max=100)
+    ] = 20,
+    limit: Annotated[
+        int, typer.Option("--limit", help="只展示评分最高的前 N 名。", min=1, max=100)
+    ] = 10,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="输出机器可读 JSON。")
+    ] = False,
+) -> None:
+    """全市场研究筛选：按市值取样 → 基本面评分排序；联网，不构成投资建议。"""
+
+    try:
+        from analysis.scorer import analyze
+        from analysis.screen import hk_universe, us_universe
+
+        market_name = market.strip().upper()
+        if market_name == "HK":
+            universe = hk_universe(top)
+            pool_note = f"港股全市场市值前 {len(universe)}（AKShare 快照；不可用时回落内置大盘池）"
+        elif market_name == "US":
+            universe = us_universe(top)
+            pool_note = f"美股内置大盘池前 {len(universe)}（免费源无全市场清单，覆盖以池为准）"
+        else:
+            raise ValueError(f"Unsupported market: {market!r}")
+
+        console.print(f"[yellow]标的池：{pool_note}；正在联网获取行情…[/yellow]")
+        ranked = []
+        failures: dict[str, str] = {}
+        for ticker in universe:
+            try:
+                snapshot = get_stock(ticker, market_name)
+            except Exception as exc:  # noqa: BLE001 - screening skips broken symbols
+                failures[ticker] = _error_code(exc)
+                continue
+            ranked.append(analyze(snapshot))
+        ranked.sort(key=lambda item: item.get("total_score", 0), reverse=True)
+        if not ranked and failures:
+            sample = ", ".join(
+                f"{ticker}:{reason}" for ticker, reason in list(failures.items())[:3]
+            )
+            console.print(
+                f"[red]所有标的的行情获取都失败了（示例 {sample}）。"
+                "检查网络或稍后重试；也可用 --fixture 离线演练。[/red]"
+            )
+            return
+
+        if json_output:
+            _json_dump(ranked[:limit])
+            return
+        console.print(
+            "[yellow]研究筛选：描述性基本面评分，不构成投资建议或买卖推荐。[/yellow]"
+        )
+        table = Table(title=f"Alpha Guard 全市场筛选（{market_name}）")
+        table.add_column("排名")
+        table.add_column("标的")
+        table.add_column("评分")
+        table.add_column("覆盖率")
+        table.add_column("结论", overflow="fold")
+        shown = 0
+        for item in ranked:
+            if shown >= limit:
+                break
+            shown += 1
+            table.add_row(
+                str(shown),
+                f"{item.get('ticker')} {item.get('name') or ''}".strip(),
+                f"{item.get('total_score')}/100",
+                f"{item.get('coverage_pct', 0)}%",
+                str(item.get("verdict")),
+            )
+        console.print(table)
+        if ranked:
+            skipped = len(universe) - len(ranked)
+            if skipped:
+                console.print(f"另有 {skipped} 个标的因数据不可用被跳过。")
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         _handle_failure(exc)
 
