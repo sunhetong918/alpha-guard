@@ -36,7 +36,7 @@ class OrderOutcome:
 
     status: str  # "submitted" | "rejected" | "skipped_dry_run"
     broker_order_id: str | None
-    mode: str  # "dry" | "live"
+    mode: str  # always "dry" in the read-only product
     message: str = ""
     submitted_at: str = field(default_factory=_utc_now_iso)
 

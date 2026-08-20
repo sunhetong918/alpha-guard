@@ -26,6 +26,7 @@ PACKAGE_DIRECTORIES = (
     "reliability",
     "signals",
     "state",
+    "trading",
 )
 TOP_LEVEL_BUILD_FILES = (
     "README.md",
@@ -130,11 +131,15 @@ def test_wheel_contains_runtime_modules_and_packages(built_wheel: Path) -> None:
             name for name in names if name.endswith(".dist-info/METADATA")
         )
         metadata = BytesParser().parsebytes(wheel.read(metadata_name))
+        broker_source = wheel.read("trading/broker.py").decode()
 
     assert expected <= names
     assert "alpha-guard = main:app" in entry_points
     assert "alpha-guard-desktop = desktop.app:main" in entry_points
     assert "alpha-guard-guardian = guardian.service:main" in entry_points
+    assert "OpenSecuContext" not in broker_source
+    assert "OpenSecTradeContext" not in broker_source
+    assert "place_order" not in broker_source
     assert {"desktop", "desktop-build"} <= set(
         metadata.get_all("Provides-Extra", [])
     )
@@ -158,6 +163,7 @@ def test_native_release_freezes_installed_wheel_not_editable_checkout() -> None:
     workflow = DESKTOP_RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "--no-install-project" in workflow
+    assert "--extra futu" in workflow
     assert "uv build \\\n" in workflow
     assert "uv pip install \\\n" in workflow
     assert "--python .venv" in workflow
@@ -166,6 +172,7 @@ def test_native_release_freezes_installed_wheel_not_editable_checkout() -> None:
     assert "is_relative_to(environment)" in workflow
     assert "uv run --no-sync pyinstaller" in workflow
     assert '--icon "desktop/assets/AlphaGuard.icns"' in workflow
+    assert "--collect-all futu" in workflow
     assert re.search(r"uv run(?! --no-sync) pyinstaller", workflow) is None
     assert (
         "dist/AlphaGuard-Desktop.app/Contents/MacOS/AlphaGuard-Desktop --help"

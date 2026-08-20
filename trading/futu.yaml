@@ -1,16 +1,10 @@
-# Futu OpenAPI trading configuration.
+# Offline order-intent rehearsal configuration.
 #
-# Safety defaults: everything below is OFF. The freshly cloned repository never
-# connects to Futu OpenD and never places orders. Auto trading additionally
-# requires `uv sync --frozen --extra futu`, a running OpenD gateway, and a
-# Futu account with OpenAPI permission.
-#
-# mode:
-#   dry  - resolve and audit orders without sending them (default)
-#   live - place real orders; requires confirm_live: true
+# Alpha Guard's Futu integration is quote-only. This file can exercise rule,
+# risk and order-intent calculations locally, but it never imports a broker SDK,
+# connects to a trading account, or sends an order.
 enabled: false
 mode: dry
-confirm_live: false
 auto_trade: {}
 # Example opt-in for one instrument:
 # auto_trade:

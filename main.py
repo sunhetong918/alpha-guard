@@ -37,6 +37,7 @@ from config import (
     load_rules_config,
 )
 from data.fetcher import get_stock
+from data.futu_provider import FutuQuote
 from news.filter import filter_news
 from news.sources import fetch_all_news
 from notifier.telegram_bot import (
@@ -60,6 +61,7 @@ from notifier.mobile import (
 from reliability import (
     ProviderRuntime,
     ProviderRuntimeConfig,
+    ProviderAttempt,
     ProviderUnavailableError,
     ReliabilityReport,
     evaluate_snapshot_reliability,
@@ -542,6 +544,57 @@ def _load_fixture(path: Path) -> dict[str, dict[str, Any]]:
     return snapshots
 
 
+async def _prefetch_futu_quotes(
+    instruments: Sequence[tuple[str, InstrumentConfig]],
+    runtime: ProviderRuntime,
+) -> dict[tuple[str, str], tuple[FutuQuote | None, tuple[ProviderAttempt, ...]]]:
+    """Batch optional Futu snapshots once per market for one scan."""
+
+    from data import futu_provider
+
+    if not instruments or not futu_provider.quote_available():
+        return {}
+    settings = get_settings()
+    by_market: dict[str, list[str]] = {}
+    for ticker, instrument in instruments:
+        by_market.setdefault(instrument.market, []).append(ticker)
+
+    async def fetch_market(
+        market: str, tickers: Sequence[str]
+    ) -> dict[
+        tuple[str, str], tuple[FutuQuote | None, tuple[ProviderAttempt, ...]]
+    ]:
+        normalized = sorted(set(tickers))
+        collected: dict[str, FutuQuote] = {}
+        collected_attempts: list[ProviderAttempt] = []
+        for offset in range(0, len(normalized), 400):
+            chunk = normalized[offset : offset + 400]
+            quotes, attempts = await asyncio.to_thread(
+                futu_provider.fetch_quotes,
+                chunk,
+                market=market,
+                host=settings.futu_opend_host,
+                port=settings.futu_opend_quote_port,
+                runtime=runtime,
+            )
+            collected.update(quotes)
+            collected_attempts.extend(attempts)
+        attempt_evidence = tuple(collected_attempts)
+        return {
+            (market, ticker): (collected.get(ticker), attempt_evidence)
+            for ticker in normalized
+        }
+
+    market_results = await asyncio.gather(
+        *(fetch_market(market, tickers) for market, tickers in sorted(by_market.items()))
+    )
+    return {
+        key: value
+        for result in market_results
+        for key, value in result.items()
+    }
+
+
 async def _fetch_snapshots(
     instruments: Sequence[tuple[str, InstrumentConfig]],
     fixture_path: Path | None,
@@ -566,6 +619,8 @@ async def _fetch_snapshots(
                 snapshots[ticker] = fixture[ticker]
         return snapshots, errors, {}, []
 
+    futu_prefetch = await _prefetch_futu_quotes(instruments, provider_runtime)
+
     async def fetch_one(
         ticker: str, instrument: InstrumentConfig
     ) -> tuple[str, dict[str, Any] | None, ReliabilityReport | None, Exception | None]:
@@ -585,6 +640,7 @@ async def _fetch_snapshots(
                 ),
                 provider_runtime=provider_runtime,
                 timeout_seconds=rules.reliability.provider.request_timeout_seconds,
+                futu_prefetch=futu_prefetch.get((instrument.market, ticker)),
             )
             report = ReliabilityReport.model_validate(snapshot.get("reliability"))
             # The data adapter already gates, but the workflow repeats the
@@ -707,7 +763,6 @@ def _revalidate_snapshot_for_decision(
             rules.reliability.freshness.future_tolerance_seconds
         ),
         provider_attempts=prior_report.provider_attempts,
-        cache_state=prior_report.cache_state,
     )
     return gate_snapshot_for_decision(raw, report, required_fields), report
 
@@ -3223,7 +3278,9 @@ def validate() -> None:
             f"AI 筛选：{'启用' if news.ai_filter.enabled else '禁用'}；"
             f"外发通知：{'启用' if settings.notifications_enabled else '禁用'}；"
             f"Heartbeat：{'启用' if settings.heartbeat_enabled else '禁用'}；"
-            f"Futu 交易：{'启用（' + futu_config.mode + '）' if futu_config.enabled else '禁用'}"
+            f"Futu 只读行情：{'启用' if settings.futu_enabled else '禁用'}；"
+            "订单意图离线演练："
+            f"{'启用（dry）' if futu_config.enabled else '禁用'}"
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         _handle_failure(exc)

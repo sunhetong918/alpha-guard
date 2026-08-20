@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from data import fetcher
+from data.futu_provider import FutuQuote
 from reliability import (
+    CacheState,
     FieldFreshnessPolicy,
     FreshnessContext,
     ProviderRuntime,
@@ -152,6 +154,49 @@ def test_us_snapshot_normalizes_ratio_roe_and_rejects_nonfinite_values(monkeypat
     assert "pe_ttm:missing_or_non_finite" in snapshot["quality_issues"]
 
 
+def test_us_snapshot_prefers_futu_price_and_keeps_yfinance_fundamentals(
+    monkeypatch,
+) -> None:
+    info = _complete_info(
+        currentPrice=190.0,
+        trailingPE=31.5,
+        priceToBook=45.0,
+        returnOnEquity=0.42,
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+    monkeypatch.setattr(
+        "data.futu_provider.fetch_quote",
+        lambda ticker, **_kwargs: (
+            FutuQuote(
+                price=231.5,
+                name="Apple from Futu",
+                source_as_of="2026-08-20T13:30:00+00:00",
+                observed_at="2026-08-20T13:30:01+00:00",
+            ),
+            (),
+        ),
+    )
+
+    snapshot = fetcher.get_us_stock("aapl")
+
+    assert snapshot["ticker"] == "AAPL"
+    assert snapshot["price"] == 231.5
+    assert snapshot["name"] == "Apple from Futu"
+    assert snapshot["pe_ttm"] == 31.5
+    assert snapshot["roe"] == 42.0
+    assert snapshot["provider"] == "futu+yfinance"
+    assert snapshot["source"]["price"] == "futu"
+    assert snapshot["source"]["pe_ttm"] == "yfinance"
+    assert snapshot["field_metadata"]["price"]["source_as_of"] == (
+        "2026-08-20T13:30:00+00:00"
+    )
+
+
 def test_calc_roe_uses_percentage_points_for_both_paths():
     assert fetcher._calc_roe({"returnOnEquity": 0.25}) == 25.0
     assert fetcher._calc_roe({"returnOnEquity": "23.5%"}) == 23.5
@@ -189,6 +234,333 @@ def test_hk_quote_failure_falls_back_to_yfinance_with_quality_issue(monkeypatch)
     assert snapshot["source"]["price"] == "yfinance"
     assert snapshot["provider"] == "yfinance"
     assert "akshare:quote_not_found" in snapshot["quality_issues"]
+
+
+def test_stale_futu_quote_falls_back_to_fresh_akshare_price(monkeypatch) -> None:
+    info = _complete_info(currentPrice=99.0, currency="HKD")
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+    monkeypatch.setattr(
+        "data.futu_provider.fetch_quote",
+        lambda ticker, **_kwargs: (
+            FutuQuote(
+                price=120.0,
+                name="stale",
+                source_as_of="2026-08-20T01:20:00+00:00",
+                observed_at="2026-08-20T01:20:01+00:00",
+                cache_state=CacheState.STALE_IF_ERROR,
+                usable_for_signal=False,
+            ),
+            (),
+        ),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "ak",
+        SimpleNamespace(
+            stock_hk_spot_em=lambda: FakeFrame(
+                [
+                    {
+                        "代码": "00700",
+                        "名称": "腾讯控股",
+                        "最新价": "121",
+                        "更新时间": "2026-08-20T09:30:00+08:00",
+                    }
+                ]
+            )
+        ),
+    )
+
+    snapshot = fetcher.get_hk_stock("00700")
+
+    assert snapshot["price"] == 121.0
+    assert snapshot["source"]["price"] == "akshare"
+    assert "futu:stale_or_unusable" in snapshot["quality_issues"]
+
+
+def test_futu_quote_without_exchange_time_falls_back_instead_of_blocking(
+    monkeypatch,
+) -> None:
+    info = _complete_info(currentPrice=99.0, currency="HKD")
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+    monkeypatch.setattr(
+        "data.futu_provider.fetch_quote",
+        lambda ticker, **_kwargs: (
+            FutuQuote(
+                price=120.0,
+                name="timestamp missing",
+                source_as_of=None,
+                observed_at="2026-08-20T01:30:01+00:00",
+            ),
+            (),
+        ),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "ak",
+        SimpleNamespace(
+            stock_hk_spot_em=lambda: FakeFrame(
+                [
+                    {
+                        "代码": "00700",
+                        "名称": "腾讯控股",
+                        "最新价": "121",
+                        "更新时间": "2026-08-20T09:30:00+08:00",
+                    }
+                ]
+            )
+        ),
+    )
+
+    snapshot = fetcher.get_hk_stock("00700")
+
+    assert snapshot["price"] == 121.0
+    assert snapshot["source"]["price"] == "akshare"
+    assert "futu:timestamp_unavailable" in snapshot["quality_issues"]
+
+
+def test_futu_price_remains_usable_when_yfinance_info_fails(monkeypatch) -> None:
+    class _PriceOnlyTicker:
+        @property
+        def info(self):
+            raise ConnectionError("Yahoo unavailable")
+
+        def history(self, period, timeout=10):
+            return FakeHistory()
+
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: _PriceOnlyTicker()),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+    monkeypatch.setattr(
+        "data.futu_provider.fetch_quote",
+        lambda ticker, **_kwargs: (
+            FutuQuote(
+                price=231.5,
+                name="Apple",
+                source_as_of="2026-08-20T13:59:50+00:00",
+                observed_at="2026-08-20T13:59:51+00:00",
+                cache_state=CacheState.MISS,
+                usable_for_signal=True,
+            ),
+            (),
+        ),
+    )
+    context = FreshnessContext(
+        evaluated_at=datetime(2026, 8, 20, 14, 0, tzinfo=UTC),
+        market_phase="open",
+    )
+
+    snapshot = fetcher.get_stock(
+        "AAPL",
+        "US",
+        required_fields={"price"},
+        freshness_policies={"price": PRICE_POLICY},
+        freshness_context=context,
+    )
+
+    assert snapshot["price"] == 231.5
+    assert snapshot["pe_ttm"] is None
+    assert snapshot["source"]["price"] == "futu"
+    assert snapshot["reliability"]["fields"]["price"]["usable_for_signal"] is True
+    assert "yfinance:info_unavailable" in snapshot["quality_issues"]
+
+
+def test_akshare_price_remains_usable_when_yfinance_info_fails(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 1, 30, 10, tzinfo=UTC)
+
+    class _PriceOnlyTicker:
+        @property
+        def info(self):
+            raise ConnectionError("Yahoo unavailable")
+
+        def history(self, period, timeout=10):
+            return FakeHistory()
+
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: _PriceOnlyTicker()),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: False)
+    monkeypatch.setattr(
+        fetcher,
+        "ak",
+        SimpleNamespace(
+            stock_hk_spot_em=lambda: FakeFrame(
+                [
+                    {
+                        "代码": "00700",
+                        "名称": "腾讯控股",
+                        "最新价": "121",
+                        "更新时间": "2026-08-20T09:30:00+08:00",
+                    }
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr(fetcher, "_utc_now_iso", lambda: now.isoformat())
+
+    snapshot = fetcher.get_stock(
+        "00700",
+        "HK",
+        required_fields={"price"},
+        freshness_policies={"price": PRICE_POLICY},
+        freshness_context=FreshnessContext(
+            evaluated_at=now,
+            market_phase="open",
+        ),
+    )
+
+    assert snapshot["price"] == 121.0
+    assert snapshot["source"]["price"] == "akshare"
+    assert snapshot["reliability"]["fields"]["price"]["usable_for_signal"] is True
+    assert "yfinance:info_unavailable" in snapshot["quality_issues"]
+
+
+def test_future_dated_futu_quote_retries_with_yfinance_price(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 14, 0, tzinfo=UTC)
+    info = _complete_info(
+        currentPrice=230.0,
+        regularMarketTime=int((now - timedelta(seconds=10)).timestamp()),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr(fetcher, "_utc_now_iso", lambda: now.isoformat())
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+    monkeypatch.setattr(
+        "data.futu_provider.fetch_quote",
+        lambda ticker, **_kwargs: (
+            FutuQuote(
+                price=999.0,
+                name="future",
+                source_as_of=(now + timedelta(minutes=10)).isoformat(),
+                observed_at=now.isoformat(),
+            ),
+            (),
+        ),
+    )
+
+    snapshot = fetcher.get_stock(
+        "AAPL",
+        "US",
+        required_fields={"price"},
+        freshness_policies={"price": PRICE_POLICY},
+        freshness_context=FreshnessContext(
+            evaluated_at=now,
+            market_phase="open",
+        ),
+    )
+
+    assert snapshot["price"] == 230.0
+    assert snapshot["source"]["price"] == "yfinance"
+    assert "futu:quote_failed_freshness" in snapshot["quality_issues"]
+
+
+def test_stale_akshare_quote_retries_with_fresh_yfinance_price(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 1, 30, 10, tzinfo=UTC)
+    info = _complete_info(
+        currentPrice=230.0,
+        currency="HKD",
+        regularMarketTime=int((now - timedelta(seconds=10)).timestamp()),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: False)
+    monkeypatch.setattr(
+        fetcher,
+        "_find_hk_quote",
+        lambda *_args, **_kwargs: (
+            {
+                "代码": "00700",
+                "名称": "腾讯控股",
+                "最新价": "121",
+                "更新时间": "2026-08-20T09:30:00+08:00",
+            },
+            now.isoformat(),
+            CacheState.STALE_IF_ERROR,
+        ),
+    )
+    monkeypatch.setattr(fetcher, "_utc_now_iso", lambda: now.isoformat())
+
+    snapshot = fetcher.get_stock(
+        "00700",
+        "HK",
+        required_fields={"price"},
+        freshness_policies={"price": PRICE_POLICY},
+        freshness_context=FreshnessContext(
+            evaluated_at=now,
+            market_phase="open",
+        ),
+    )
+
+    assert snapshot["price"] == 230.0
+    assert snapshot["source"]["price"] == "yfinance"
+    assert "akshare:quote_failed_freshness" in snapshot["quality_issues"]
+
+
+def test_future_akshare_quote_retries_with_fresh_yfinance_price(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 1, 30, 10, tzinfo=UTC)
+    info = _complete_info(
+        currentPrice=230.0,
+        currency="HKD",
+        regularMarketTime=int((now - timedelta(seconds=10)).timestamp()),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "yf",
+        SimpleNamespace(Ticker=lambda _symbol: FakeTicker(info)),
+    )
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: False)
+    monkeypatch.setattr(
+        fetcher,
+        "ak",
+        SimpleNamespace(
+            stock_hk_spot_em=lambda: FakeFrame(
+                [
+                    {
+                        "代码": "00700",
+                        "名称": "腾讯控股",
+                        "最新价": "121",
+                        "更新时间": "2026-08-20T09:40:00+08:00",
+                    }
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr(fetcher, "_utc_now_iso", lambda: now.isoformat())
+
+    snapshot = fetcher.get_stock(
+        "00700",
+        "HK",
+        required_fields={"price"},
+        freshness_policies={"price": PRICE_POLICY},
+        freshness_context=FreshnessContext(
+            evaluated_at=now,
+            market_phase="open",
+        ),
+    )
+
+    assert snapshot["price"] == 230.0
+    assert snapshot["source"]["price"] == "yfinance"
+    assert "akshare:quote_failed_freshness" in snapshot["quality_issues"]
 
 
 @pytest.mark.parametrize("ticker", ["", "ABC", "00000", "100000"])

@@ -35,10 +35,17 @@ _SNAPSHOT = {"price": 300.0, "market": "HK", "currency": "HKD", "as_of": "2026-0
 
 
 class TestConfig:
-    def test_live_requires_confirm(self) -> None:
-        with pytest.raises(Exception, match="confirm_live"):
+    def test_live_mode_is_not_part_of_the_read_only_product(self) -> None:
+        with pytest.raises(Exception):
             FutuTradingConfig.model_validate(
-                {"enabled": True, "mode": "live", "auto_trade": {}}
+                {
+                    "enabled": True,
+                    "mode": "live",
+                    "confirm_live": True,
+                    "auto_trade": {
+                        "00700": {"side": "sell", "quantity": 100}
+                    },
+                }
             )
 
     def test_unknown_field_rejected(self) -> None:
@@ -105,7 +112,7 @@ class TestGuard:
 class TestBrokers:
     def test_dry_run_never_submits(self) -> None:
         broker = DryRunBroker()
-        outcome = broker.place_order(
+        outcome = broker.record_intent(
             OrderIntent(
                 ticker="00700",
                 market="HK",
@@ -121,27 +128,12 @@ class TestBrokers:
         assert broker.mode == "dry"
         assert len(broker.intents) == 1
 
-    def test_build_broker_respects_mode(self) -> None:
+    def test_build_broker_is_always_an_offline_dry_run(self) -> None:
         class _Settings:
             futu_opend_host = "127.0.0.1"
-            futu_opend_trade_port = 11111
 
         assert build_broker(FutuTradingConfig.model_validate({}), _Settings).mode == "dry"
         assert build_broker(_config(), _Settings).mode == "dry"
-        live = build_broker(
-            FutuTradingConfig.model_validate(
-                {
-                    "enabled": True,
-                    "mode": "live",
-                    "confirm_live": True,
-                    "auto_trade": {
-                        "00700": {"side": "sell", "quantity": 100}
-                    },
-                }
-            ),
-            _Settings,
-        )
-        assert live.mode == "live"
 
 
 def _evaluation(decision: str) -> dict:

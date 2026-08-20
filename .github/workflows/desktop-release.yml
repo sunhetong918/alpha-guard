@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: >-
           uv sync --frozen --no-dev --extra desktop --extra desktop-build
-          --extra notifications --no-install-project
+          --extra notifications --extra futu --no-install-project
 
       - name: Build and install release wheel
         shell: bash
@@ -215,6 +215,7 @@ jobs:
             --name alpha-guard-guardian \
             --hidden-import PySide6.QtNetwork \
             --collect-all keyring \
+            --collect-all futu \
             --copy-metadata alpha-guard \
             --add-data "signals/rules.yaml:signals" \
             --add-data "news/config.yaml:news" \
@@ -253,6 +254,7 @@ jobs:
             --name alpha-guard-guardian `
             --hidden-import PySide6.QtNetwork `
             --collect-all keyring `
+            --collect-all futu `
             --copy-metadata alpha-guard `
             --add-data "signals/rules.yaml:signals" `
             --add-data "news/config.yaml:news" `

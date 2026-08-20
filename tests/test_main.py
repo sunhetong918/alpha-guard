@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 import main
 from config import AIFilterConfig, Settings, load_news_config, load_rules_config
 from reliability import (
+    CacheState,
     CircuitSnapshot,
     ProviderKey,
     ProviderRuntime,
@@ -34,6 +35,7 @@ from notifier.heartbeat import (
     ping_heartbeat,
 )
 from notifier.whatsapp import WhatsAppDeliveryResult
+from data.futu_provider import FutuQuote
 
 
 runner = CliRunner()
@@ -249,6 +251,118 @@ def _reliable_fake(snapshot_factory):
         )
 
     return fake_stock
+
+
+def test_decision_revalidation_does_not_spread_stale_fundamentals_to_price() -> None:
+    evaluated_at = main.datetime(2026, 8, 20, 14, 0, tzinfo=main.UTC)
+    instrument = _enabled_aapl()
+    rules = load_rules_config()
+    snapshot = _snapshot(price=231.5)
+    snapshot["pe_ttm"] = 31.5
+    snapshot["roe"] = 42.0
+    snapshot["field_metadata"]["price"].update(
+        {
+            "source_as_of": "2026-08-20T13:59:50+00:00",
+            "observed_at": "2026-08-20T13:59:51+00:00",
+            "cache_state": CacheState.MISS.value,
+        }
+    )
+    for field in ("pe_ttm", "roe"):
+        snapshot["field_metadata"][field].update(
+            {
+                "observed_at": "2026-08-20T13:59:51+00:00",
+                "cache_state": CacheState.STALE_IF_ERROR.value,
+            }
+        )
+    required = main.required_fields_for_rules(instrument)
+    prior = evaluate_snapshot_reliability(
+        snapshot,
+        required,
+        rules.reliability.freshness.fields,
+        main.market_freshness_context("US", evaluated_at),
+    )
+    gated = gate_snapshot_for_decision(snapshot, prior, required)
+
+    _refreshed_snapshot, refreshed = main._revalidate_snapshot_for_decision(
+        gated,
+        prior,
+        instrument,
+        rules,
+        evaluated_at=evaluated_at + timedelta(seconds=5),
+    )
+
+    assert prior.cache_state == CacheState.STALE_IF_ERROR
+    assert refreshed.fields["price"].usable_for_signal is True
+    assert refreshed.fields["pe_ttm"].usable_for_signal is False
+
+
+def test_scan_prefetches_same_market_futu_quotes_in_one_batch(monkeypatch) -> None:
+    evaluated_at = main.datetime(2026, 8, 20, 14, 0, tzinfo=main.UTC)
+    instrument = _enabled_price_aapl()
+    instruments = [
+        ("AAPL", instrument),
+        ("MSFT", instrument.model_copy(update={"name": "Microsoft"})),
+    ]
+    batch_calls: list[tuple[str, ...]] = []
+    seen_prefetch: list[str] = []
+
+    monkeypatch.setattr("data.futu_provider.quote_available", lambda: True)
+
+    def fetch_quotes(tickers, **_kwargs):  # noqa: ANN001
+        batch_calls.append(tuple(tickers))
+        return (
+            {
+                ticker: FutuQuote(
+                    price=200.0 + index,
+                    name=ticker,
+                    source_as_of="2026-08-20T13:59:50+00:00",
+                    observed_at="2026-08-20T13:59:51+00:00",
+                )
+                for index, ticker in enumerate(tickers)
+            },
+            (),
+        )
+
+    monkeypatch.setattr("data.futu_provider.fetch_quotes", fetch_quotes)
+
+    def fake_stock(ticker, market, **kwargs):  # noqa: ANN001
+        prefetched = kwargs.get("futu_prefetch")
+        if prefetched is not None and prefetched[0] is not None:
+            seen_prefetch.append(ticker)
+        snapshot = _snapshot(price=200.0)
+        snapshot["ticker"] = ticker
+        snapshot["field_metadata"]["price"].update(
+            {
+                "source_as_of": "2026-08-20T13:59:50+00:00",
+                "observed_at": "2026-08-20T13:59:51+00:00",
+            }
+        )
+        report = evaluate_snapshot_reliability(
+            snapshot,
+            kwargs["required_fields"],
+            kwargs["freshness_policies"],
+            kwargs["freshness_context"],
+        )
+        return gate_snapshot_for_decision(
+            snapshot, report, kwargs["required_fields"]
+        )
+
+    monkeypatch.setattr(main, "get_stock", fake_stock)
+
+    snapshots, errors, _reports, _failures = asyncio.run(
+        main._fetch_snapshots(
+            instruments,
+            None,
+            rules=load_rules_config(),
+            provider_runtime=ProviderRuntime(),
+            evaluated_at=evaluated_at,
+        )
+    )
+
+    assert errors == {}
+    assert set(snapshots) == {"AAPL", "MSFT"}
+    assert batch_calls == [("AAPL", "MSFT")]
+    assert seen_prefetch == ["AAPL", "MSFT"]
 
 
 def _snapshot_at(at, price: float = 160.0) -> dict:

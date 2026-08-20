@@ -313,8 +313,14 @@ async def send_news_alert(
 def render_trade_alert(record: Mapping[str, Any]) -> str:
     """Render one guarded trading outcome (submission, skip or denial)."""
 
-    intent = record.get("intent") if isinstance(record.get("intent"), Mapping) else {}
-    outcome = record.get("outcome") if isinstance(record.get("outcome"), Mapping) else {}
+    raw_intent = record.get("intent")
+    intent: Mapping[str, Any] = (
+        raw_intent if isinstance(raw_intent, Mapping) else {}
+    )
+    raw_outcome = record.get("outcome")
+    outcome: Mapping[str, Any] = (
+        raw_outcome if isinstance(raw_outcome, Mapping) else {}
+    )
     ticker = _escaped(intent.get("ticker", "?"), 32, empty="?")
     side = _escaped(intent.get("side", "?"), 8, empty="?")
     quantity = _escaped(intent.get("quantity", "?"), 12, empty="?")

@@ -184,6 +184,19 @@ def test_settings_default_to_no_real_notifications(monkeypatch):
     assert settings.heartbeat_timeout_seconds == 5
 
 
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "192.168.1.10", "opend.example", "::1"]
+)
+def test_futu_opend_is_restricted_to_this_mac(host: str) -> None:
+    with pytest.raises(ValidationError, match="127.0.0.1"):
+        Settings(futu_enabled=True, futu_opend_host=host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_futu_opend_accepts_loopback_hosts(host: str) -> None:
+    assert Settings(futu_enabled=True, futu_opend_host=host).futu_opend_host == host
+
+
 def test_settings_are_loaded_centrally_from_explicit_env_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     env_path = tmp_path / "alpha.env"

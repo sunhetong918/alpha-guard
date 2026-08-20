@@ -1,6 +1,6 @@
 # 桌面 App、后台 Guardian 与移动提醒
 
-状态：本地桌面交付基线｜更新：2026-08-12
+状态：本地桌面交付基线｜更新：2026-08-20
 
 Alpha Guard 的桌面形态不是“把 CLI 套进一个窗口”，而是三个职责明确的部件：
 
@@ -27,14 +27,14 @@ flowchart LR
 支持 Python 3.11 和 3.12。源码工作区中安装桌面、Guardian 和 Telegram 依赖：
 
 ```bash
-uv sync --frozen --extra desktop --extra notifications
+uv sync --frozen --extra desktop --extra notifications --extra futu
 ```
 
 从构建好的 wheel 安装时使用相同 extras：
 
 ```bash
 uv build --wheel
-python -m pip install "alpha-guard[desktop,notifications]"
+python -m pip install "alpha-guard[desktop,notifications,futu]"
 ```
 
 项目尚未发布到包索引时，把 `alpha-guard[...]` 换成实际 wheel 路径即可。三个入口彼此独立：
@@ -84,6 +84,10 @@ AlphaGuard/
 ```
 
 桌面 release launcher 会把同一 `AlphaGuard` 目录中的 Guardian 加到它自己的子进程搜索路径，因此双击桌面后仍能按生产默认启动/连接后台进程；它不会把这个路径永久写入用户的全局 `PATH`。
+
+不要只把 `.app` 单独拖走：`AlphaGuard-Desktop.app` 与
+`alpha-guard-guardian/` 必须保留在同一个 `AlphaGuard` 文件夹中。后台程序、
+可编辑规则和 `.env` 都在 Guardian 文件夹；只移动窗口外壳会导致后台无法启动。
 
 ### 正式签名与 notarization
 
@@ -138,6 +142,31 @@ Windows Authenticode 可选 secrets：
 6. UI 只发送公开偏好，例如时区、语言、安静时段和登录自启。Telegram token、WhatsApp access token、provider key 与 heartbeat URL 继续只从本地环境或受信任 secret 配置读取。
 
 这一边界不等于“同一账号下的任意恶意进程都不可信”。若本机用户会话已被完全攻陷，攻击者通常也能以该用户权限读取配置或操纵进程；此时应先隔离主机并轮换 Telegram、Meta、provider 与 heartbeat 凭据。
+
+## Futu OpenD 只读行情
+
+原生 Guardian 已包含 Futu Python SDK，但不包含 OpenD，也不会读取 Futu
+账号密码。首次启用仍需完成下面几步：
+
+1. 从 Futu 官方安装并登录 OpenD，完成 OpenAPI 协议/问卷；保持 OpenD
+   监听 `127.0.0.1:11111`。不要监听局域网地址。
+2. 在 `AlphaGuard/alpha-guard-guardian/` 中把 `.env.example` 复制为
+   `.env`，把 `FUTU_ENABLED=false` 改成 `FUTU_ENABLED=true`。
+3. 在同一目录的 `signals/rules.yaml` 中，把需要监控的 AAPL、腾讯或自定义
+   标的设为 `enabled: true`，并先人工复核阈值与币种。
+4. 保持 OpenD 和 Guardian 运行，在桌面点击“运行一次扫描”。扫描完成后，
+   Providers 页出现 `futu / us_snapshot` 或 `futu / hk_snapshot`，且对应价格
+   字段来源为 `futu`，才证明这次实际采用了 Futu 行情。
+
+Guardian 每个市场每轮最多按 400 个代码批量读取快照；它不是逐笔行情终端。
+OpenD 未启动、未登录、超时、无行情权限或返回时间不可用时，Futu 会在有界
+时间内失败并回退到港股 AKShare / yfinance。回退保证扫描尽量继续，但不能
+证明 Futu 已连接。`doctor` 默认完全离线，因此也不会主动探测 11111 端口。
+
+Alpha Guard 只创建 `OpenQuoteContext`。它不创建交易 Context、不解锁账户、
+不接收交易密码，也没有外部下单调用。Futu 官方接入说明见
+[OpenD 快速开始](https://openapi.futunn.com/futu-api-doc/en/quick/demo.html)与
+[市场快照接口](https://openapi.futunn.com/futu-api-doc/en/quote/get-market-snapshot.html)。
 
 ## Telegram 与 WhatsApp 独立送达
 

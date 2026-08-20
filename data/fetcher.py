@@ -41,6 +41,7 @@ from data.futu_provider import FutuQuote
 
 _MISSING_STRINGS = {"", "-", "--", "n/a", "na", "nan", "none", "null"}
 _T = TypeVar("_T")
+FutuPrefetch = tuple[FutuQuote | None, tuple[ProviderAttempt, ...]]
 
 
 def _validated_timeout(value: float) -> float:
@@ -271,6 +272,41 @@ def _safe_history(
         return None, None, CacheState.NONE, attempts
 
 
+def _fetch_info_or_price_only(
+    ticker_obj: Any,
+    *,
+    symbol: str,
+    market: str,
+    runtime: ProviderRuntime | None,
+    fallback_price_observed_at: str | None,
+    issues: list[str],
+    attempts: list[ProviderAttempt],
+) -> tuple[dict[str, Any], str, CacheState]:
+    """Keep a fresh Futu price usable when yfinance fundamentals are down."""
+
+    try:
+        info, observed_at, cache_state, info_attempts = _fetch_info(
+            ticker_obj,
+            symbol=symbol,
+            market=market,
+            runtime=runtime,
+        )
+    except ProviderUnavailableError as exc:
+        attempts.extend(exc.attempts)
+        if fallback_price_observed_at is None:
+            raise
+    except RuntimeError:
+        if fallback_price_observed_at is None:
+            raise
+    else:
+        attempts.extend(info_attempts)
+        return info, observed_at, cache_state
+
+    _add_issue(issues, "yfinance:info_unavailable")
+    assert fallback_price_observed_at is not None
+    return {}, fallback_price_observed_at, CacheState.NONE
+
+
 def _history_is_empty(hist: Any) -> bool:
     if hist is None:
         return True
@@ -438,6 +474,8 @@ def get_us_stock(
     *,
     provider_runtime: ProviderRuntime | None = None,
     timeout_seconds: float = 10.0,
+    allow_futu: bool = True,
+    futu_prefetch: FutuPrefetch | None = None,
 ) -> dict[str, Any]:
     """Fetch a normalized US stock snapshot, e.g. ``AAPL``."""
 
@@ -449,14 +487,30 @@ def get_us_stock(
 
     issues: list[str] = []
     provider_attempts: list[ProviderAttempt] = []
+    futu_quote = (
+        _find_futu_quote(
+            symbol,
+            "US",
+            issues,
+            runtime=provider_runtime,
+            attempts=provider_attempts,
+            prefetched=futu_prefetch,
+        )
+        if allow_futu
+        else None
+    )
     ticker_obj = yfinance.Ticker(symbol)
-    info, info_observed_at, info_cache, info_attempts = _fetch_info(
+    info, info_observed_at, info_cache = _fetch_info_or_price_only(
         ticker_obj,
         symbol=symbol,
         market="US",
         runtime=provider_runtime,
+        fallback_price_observed_at=(
+            futu_quote.observed_at if futu_quote is not None else None
+        ),
+        issues=issues,
+        attempts=provider_attempts,
     )
-    provider_attempts.extend(info_attempts)
     hist, _history_observed_at, _history_cache, history_attempts = _safe_history(
         ticker_obj,
         issues,
@@ -467,15 +521,31 @@ def get_us_stock(
     )
     provider_attempts.extend(history_attempts)
     fields = _base_yfinance_fields(info, hist, issues)
+    if futu_quote is not None:
+        fields["price"] = futu_quote.price
     retrieved_at = _utc_now_iso()
     sources = _field_sources("yfinance")
-    price_as_of = _as_of_from_info(info)
+    if futu_quote is not None:
+        sources.update({"name": "futu", "price": "futu"})
+        price_as_of = futu_quote.source_as_of
+        price_observed_at = futu_quote.observed_at
+        provider = "futu+yfinance"
+        name = futu_quote.name or str(
+            info.get("longName") or info.get("shortName") or symbol
+        )
+    else:
+        price_as_of = _as_of_from_info(info)
+        price_observed_at = info_observed_at
+        provider = "yfinance"
+        name = str(info.get("longName") or info.get("shortName") or symbol)
     field_metadata = _core_field_metadata(
         sources,
         price_source_as_of=price_as_of,
-        price_observed_at=info_observed_at,
+        price_observed_at=price_observed_at,
         fundamentals_observed_at=info_observed_at,
-        price_cache_state=info_cache,
+        price_cache_state=(
+            futu_quote.cache_state if futu_quote is not None else info_cache
+        ),
         fundamentals_cache_state=info_cache,
     )
 
@@ -483,9 +553,9 @@ def get_us_stock(
         "ticker": symbol,
         "symbol": symbol,
         "market": "US",
-        "name": str(info.get("longName") or info.get("shortName") or symbol),
+        "name": name,
         **fields,
-        "provider": "yfinance",
+        "provider": provider,
         "source": sources,
         "sources": dict(sources),
         "field_metadata": field_metadata,
@@ -583,30 +653,43 @@ def _ak_as_of(row: Mapping[str, Any] | None) -> str | None:
 
 
 def _find_futu_quote(
-    local_code: str,
+    ticker: str,
+    market: str,
     issues: list[str],
     *,
     runtime: ProviderRuntime | None,
     attempts: list[ProviderAttempt],
+    prefetched: FutuPrefetch | None = None,
 ) -> "FutuQuote | None":
     """Try the opt-in Futu realtime source; never raises, records issues."""
 
     from data import futu_provider
 
-    if not futu_provider.quote_available():
-        return None
-    from config import get_settings
+    if prefetched is None:
+        if not futu_provider.quote_available():
+            return None
+        from config import get_settings
 
-    settings = get_settings()
-    quote, futu_attempts = futu_provider.fetch_hk_quote(
-        local_code,
-        host=settings.futu_opend_host,
-        port=settings.futu_opend_quote_port,
-        runtime=runtime,
-    )
+        settings = get_settings()
+        quote, futu_attempts = futu_provider.fetch_quote(
+            ticker,
+            market=market,
+            host=settings.futu_opend_host,
+            port=settings.futu_opend_quote_port,
+            runtime=runtime,
+        )
+    else:
+        quote, futu_attempts = prefetched
     attempts.extend(futu_attempts)
     if quote is None:
         _add_issue(issues, "futu:quote_not_available")
+        return None
+    if not quote.usable_for_signal:
+        _add_issue(issues, "futu:stale_or_unusable")
+        return None
+    if quote.source_as_of is None:
+        _add_issue(issues, "futu:timestamp_unavailable")
+        return None
     return quote
 
 
@@ -615,6 +698,9 @@ def get_hk_stock(
     *,
     provider_runtime: ProviderRuntime | None = None,
     timeout_seconds: float = 10.0,
+    allow_futu: bool = True,
+    allow_akshare: bool = True,
+    futu_prefetch: FutuPrefetch | None = None,
 ) -> dict[str, Any]:
     """Fetch a normalized HK stock snapshot.
 
@@ -630,14 +716,46 @@ def get_hk_stock(
     issues: list[str] = []
     provider_attempts: list[ProviderAttempt] = []
 
+    futu_quote = (
+        _find_futu_quote(
+            local_code,
+            "HK",
+            issues,
+            runtime=provider_runtime,
+            attempts=provider_attempts,
+            prefetched=futu_prefetch,
+        )
+        if allow_futu
+        else None
+    )
+    ak_quote: Mapping[str, Any] | None = None
+    ak_observed_at: str | None = None
+    ak_cache = CacheState.NONE
+    ak_price: float | None = None
+    if futu_quote is None and allow_akshare:
+        ak_quote, ak_observed_at, ak_cache = _find_hk_quote(
+            local_code,
+            issues,
+            runtime=provider_runtime,
+            attempts=provider_attempts,
+        )
+        ak_price = (
+            _to_finite_float(ak_quote.get("最新价")) if ak_quote else None
+        )
     ticker_obj = yfinance.Ticker(yf_symbol)
-    info, info_observed_at, info_cache, info_attempts = _fetch_info(
+    info, info_observed_at, info_cache = _fetch_info_or_price_only(
         ticker_obj,
         symbol=yf_symbol,
         market="HK",
         runtime=provider_runtime,
+        fallback_price_observed_at=(
+            futu_quote.observed_at
+            if futu_quote is not None
+            else (ak_observed_at if ak_price is not None and ak_price > 0 else None)
+        ),
+        issues=issues,
+        attempts=provider_attempts,
     )
-    provider_attempts.extend(info_attempts)
     hist, _history_observed_at, _history_cache, history_attempts = _safe_history(
         ticker_obj,
         issues,
@@ -649,32 +767,18 @@ def get_hk_stock(
     provider_attempts.extend(history_attempts)
     fields = _base_yfinance_fields(info, hist, issues)
 
-    futu_quote = _find_futu_quote(
-        local_code,
-        issues,
-        runtime=provider_runtime,
-        attempts=provider_attempts,
-    )
-
     if futu_quote is not None:
         fields["price"] = futu_quote.price
         price_source = "futu"
         price_as_of = futu_quote.source_as_of
         price_observed_at = futu_quote.observed_at
-        price_cache = CacheState.NONE
+        price_cache = futu_quote.cache_state
         issues[:] = [issue for issue in issues if not issue.startswith("price:")]
         futu_name = futu_quote.name
     else:
         futu_name = ""
 
     if futu_quote is None:
-        quote, quote_observed_at, quote_cache = _find_hk_quote(
-            local_code,
-            issues,
-            runtime=provider_runtime,
-            attempts=provider_attempts,
-        )
-        ak_price = _to_finite_float(quote.get("最新价")) if quote else None
         if ak_price is not None and ak_price > 0:
             fields["price"] = ak_price
             price_source = "akshare"
@@ -682,23 +786,25 @@ def get_hk_stock(
             issues[:] = [issue for issue in issues if not issue.startswith("price:")]
         else:
             price_source = "yfinance"
-            if quote and ak_price is not None and ak_price <= 0:
+            if ak_quote and ak_price is not None and ak_price <= 0:
                 _add_issue(issues, "akshare_price:non_positive")
-            elif quote:
+            elif ak_quote:
                 _add_issue(issues, "akshare_price:missing_or_non_finite")
 
-        ak_name = str(quote.get("名称") or "").strip() if quote else ""
+        ak_name = (
+            str(ak_quote.get("名称") or "").strip() if ak_quote else ""
+        )
         price_as_of = (
-            _ak_as_of(quote)
+            _ak_as_of(ak_quote)
             if price_source == "akshare"
             else _as_of_from_info(info)
         )
         price_observed_at = (
-            quote_observed_at
-            if price_source == "akshare" and quote_observed_at is not None
+            ak_observed_at
+            if price_source == "akshare" and ak_observed_at is not None
             else info_observed_at
         )
-        price_cache = quote_cache if price_source == "akshare" else info_cache
+        price_cache = ak_cache if price_source == "akshare" else info_cache
     else:
         ak_name = ""
 
@@ -797,6 +903,7 @@ def get_stock(
     future_tolerance_seconds: float = 300.0,
     provider_runtime: ProviderRuntime | None = None,
     timeout_seconds: float = 10.0,
+    futu_prefetch: FutuPrefetch | None = None,
 ) -> dict[str, Any]:
     """Unified market-data entry point.
 
@@ -836,12 +943,14 @@ def get_stock(
                 ticker_text,
                 provider_runtime=provider_runtime,
                 timeout_seconds=timeout_seconds,
+                futu_prefetch=futu_prefetch,
             )
         else:
             snapshot = get_us_stock(
                 ticker_text,
                 provider_runtime=provider_runtime,
                 timeout_seconds=timeout_seconds,
+                futu_prefetch=futu_prefetch,
             )
     except ProviderUnavailableError as exc:
         if not all(reliability_args):
@@ -897,6 +1006,82 @@ def get_stock(
         future_tolerance_seconds=future_tolerance_seconds,
         provider_attempts=attempts,
     )
+    sources = snapshot.get("sources", snapshot.get("source", {}))
+    price_evidence = report.fields.get("price")
+    price_source = sources.get("price") if isinstance(sources, Mapping) else None
+    if (
+        price_source in {"futu", "akshare"}
+        and price_evidence is not None
+        and not price_evidence.usable_for_signal
+    ):
+        # Positive provider numbers are only candidates.  Walk the remaining
+        # source order until one has usable event-time evidence.
+        fallback_modes: list[tuple[bool, bool]]
+        if market_name == "HK":
+            fallback_modes = (
+                [(False, True), (False, False)]
+                if price_source == "futu"
+                else [(False, False)]
+            )
+        else:
+            fallback_modes = [(False, False)]
+        failed_sources = [str(price_source)]
+        accumulated_attempts = attempts
+        for allow_futu_fallback, allow_ak_fallback in fallback_modes:
+            try:
+                if market_name == "HK":
+                    fallback = get_hk_stock(
+                        ticker_text,
+                        provider_runtime=provider_runtime,
+                        timeout_seconds=timeout_seconds,
+                        allow_futu=allow_futu_fallback,
+                        allow_akshare=allow_ak_fallback,
+                    )
+                else:
+                    fallback = get_us_stock(
+                        ticker_text,
+                        provider_runtime=provider_runtime,
+                        timeout_seconds=timeout_seconds,
+                        allow_futu=allow_futu_fallback,
+                    )
+            except (ProviderUnavailableError, RuntimeError):
+                continue
+            fallback_issues = list(fallback.get("quality_issues", ()))
+            for failed_source in failed_sources:
+                _add_issue(
+                    fallback_issues,
+                    f"{failed_source}:quote_failed_freshness",
+                )
+            fallback["quality_issues"] = fallback_issues
+            combined_attempts = (
+                *accumulated_attempts,
+                *_snapshot_attempts(fallback),
+            )
+            fallback["provider_attempts"] = [
+                attempt.model_dump(mode="json") for attempt in combined_attempts
+            ]
+            fallback_report = evaluate_snapshot_reliability(
+                fallback,
+                required,
+                freshness_policies,
+                freshness_context,
+                future_tolerance_seconds=future_tolerance_seconds,
+                provider_attempts=combined_attempts,
+            )
+            fallback_price = fallback_report.fields.get("price")
+            if fallback_price is not None and fallback_price.usable_for_signal:
+                snapshot = fallback
+                attempts = combined_attempts
+                report = fallback_report
+                break
+            fallback_sources = fallback.get(
+                "sources", fallback.get("source", {})
+            )
+            if isinstance(fallback_sources, Mapping):
+                candidate_source = fallback_sources.get("price")
+                if isinstance(candidate_source, str):
+                    failed_sources.append(candidate_source)
+            accumulated_attempts = combined_attempts
     hard_no_data = required and (
         all(snapshot.get(field) is None for field in required)
         or ("price" in required and snapshot.get("price") is None)

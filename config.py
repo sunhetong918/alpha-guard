@@ -356,7 +356,7 @@ class NewsConfig(StrictModel):
 
 
 class AutoTradeInstrumentConfig(StrictModel):
-    """Per-instrument auto-trade policy; defaults are deliberately narrow."""
+    """Per-instrument policy used only by the offline order rehearsal."""
 
     side: Literal["buy", "sell"]
     quantity: int = Field(ge=1, le=100_000)
@@ -369,26 +369,13 @@ class AutoTradeInstrumentConfig(StrictModel):
 
 
 class FutuTradingConfig(StrictModel):
-    """Futu trading configuration; every path stays off unless enabled."""
+    """Offline order-intent rehearsal; live brokerage is not supported."""
 
     enabled: bool = False
-    mode: Literal["dry", "live"] = "dry"
-    confirm_live: bool = False
+    mode: Literal["dry"] = "dry"
     auto_trade: dict[StableId, AutoTradeInstrumentConfig] = Field(
         default_factory=dict
     )
-
-    @model_validator(mode="after")
-    def validate_live_safety(self) -> Self:
-        if self.mode == "live":
-            if not self.confirm_live:
-                raise ValueError(
-                    "mode 'live' requires confirm_live: true as an explicit "
-                    "human acknowledgement"
-                )
-            if not self.auto_trade:
-                raise ValueError("mode 'live' requires at least one auto_trade entry")
-        return self
 
 
 class Settings(BaseSettings):
@@ -515,12 +502,14 @@ class Settings(BaseSettings):
         ge=1,
         le=65_535,
     )
-    futu_opend_trade_port: int = Field(
-        default=11111,
-        validation_alias="FUTU_OPEND_TRADE_PORT",
-        ge=1,
-        le=65_535,
-    )
+    @field_validator("futu_opend_host", mode="after")
+    @classmethod
+    def futu_opend_must_be_local(cls, value: str) -> str:
+        if value not in {"127.0.0.1", "localhost"}:
+            raise ValueError(
+                "Futu OpenD host must use 127.0.0.1 or localhost"
+            )
+        return value
 
     @field_validator(
         "telegram_bot_token",
@@ -655,7 +644,7 @@ def load_news_config(path: str | Path | None = None) -> NewsConfig:
 
 
 def load_futu_config(path: str | Path | None = None) -> FutuTradingConfig:
-    """Load and validate the Futu trading YAML relative to the repo root."""
+    """Load the offline order-rehearsal YAML relative to the repo root."""
 
     data = _load_yaml(path or TRADING_CONFIG_PATH)
     return FutuTradingConfig.model_validate(data)

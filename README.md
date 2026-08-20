@@ -6,7 +6,7 @@ Alpha Guard 把用户预先写下的价格、估值和质量规则转换为可�
 
 > **安全默认值**：依赖安装完成后，刚克隆的仓库在运行时默认离线，不访问市场或新闻数据源，也不发送 Telegram、WhatsApp 或 heartbeat。示例标的、新闻源、AI 过滤、真实通知和外部 watcher 全部关闭，必须逐层显式启用。`uv sync` 本身仍需从软件包仓库下载依赖。
 
-Alpha Guard 不是荐股软件，不承诺收益。券商连接是**可选且默认关闭的**：通过 Futu OpenAPI 集成（需 `--extra futu`、运行中的 OpenD 网关、显式配置三层开关）可启用实时行情与规则触发的自动下单，默认以 dry-run 模式只审计不下单；`live` 模式额外要求 `confirm_live: true` 人工确认。未启用时系统完全离线于券商，所有输出仍是“人工核验提醒”。一切输出均不构成投资建议。
+Alpha Guard 不是荐股软件，不承诺收益，也不连接交易账户。可选的 Futu OpenAPI 集成只通过本机 OpenD 读取美股/港股行情；代码中没有交易 Context、账户解锁或下单入口。未启用时系统完全不连接 Futu，所有输出始终只是“人工核验提醒”。一切输出均不构成投资建议。
 
 ## 为什么是“证据优先”
 
@@ -55,7 +55,7 @@ uv sync --frozen --extra ai
 # AKShare 港股报价与中文新闻
 uv sync --frozen --extra cn-data
 
-# Futu OpenAPI 实时行情与自动交易（可选，默认关闭）
+# Futu OpenAPI 只读行情（可选，默认关闭）
 uv sync --frozen --extra futu
 
 # 一次安装全部可选能力
@@ -98,16 +98,17 @@ uv run alpha-guard validate
 
 ## Futu OpenAPI 集成（可选，默认关闭）
 
-Futu 集成提供两件事：**港股实时行情**（作为 AKShare 之外的首选价格源）与**规则触发的自动交易**。安全边界如下：
+Futu 是可选的**只读报价源**。Guardian 仍按调度计划巡检，不会把桌面 App 变成逐笔行情终端：
 
-- 三层开关缺一不可：`uv sync --frozen --extra futu` 安装 SDK、`.env` 中 `FUTU_ENABLED=true`、`trading/futu.yaml` 中 `enabled: true`。
-- 交易默认 `mode: dry`：订单意图、风控裁决与限价全部正常计算并写入审计，但**不发送任何真实订单**。
-- `mode: live` 必须同时写 `confirm_live: true`，并至少配置一个 `auto_trade` 标的；配置校验会在扫描前拒绝不满足条件的安全违规。
-- 风控闸（`trading/guard.py`）只在决策为 `BUY_REVIEW`/`SELL_REVIEW` 且方向与配置一致、价格可用、未触达单日限额与冷却时放行；`UNKNOWN`/`CONFLICT` 永不下单。
-- 每笔订单（含被驳回的）都会产生不可变审计记录，并可经 `render_trade_alert` 推送到 Telegram/WhatsApp。
-- 使用 `alpha-guard trade` 可完全离线地演练整条交易链。
+- `uv sync --frozen --extra futu` 安装 Python SDK；原生 Guardian 发布包已经包含该 SDK。
+- 安装、登录本机 [OpenD](https://openapi.futunn.com/futu-api-doc/en/quick/demo.html)，并保持监听 `127.0.0.1:11111`。
+- 在 `.env` 写入 `FUTU_ENABLED=true`；Alpha Guard 不读取或保存 Futu 账号、密码、交易密码。
+- 同一市场的一轮扫描会用一个批量快照请求。美股价格使用纽约时区，港股价格使用北京时间；缺失、过期、future 或 stale-if-error 报价不会参与信号。
+- 报价顺序是 Futu → 港股 AKShare → yfinance；PE/PB/ROE 与历史基本面继续来自 yfinance。OpenD 未运行或无行情权限时自动回退并保留脱敏 provider 证据。
+- 只实例化 `OpenQuoteContext`。项目不包含 `OpenSecTradeContext`、交易解锁或订单提交代码。
+- `alpha-guard trade` 只是使用合成数据计算订单意图的离线演练，完全不联网、不下单。
 
-运行交易需要本机 [OpenD](https://www.futunn.com/openAPI) 网关与开通 OpenAPI 权限的富途账户；行情与交易权限以富途官方为准。
+Futu 的快照、权限与订阅额度以官方[市场快照](https://openapi.futunn.com/futu-api-doc/en/quote/get-market-snapshot.html)和[权限说明](https://openapi.futunn.com/futu-api-doc/en/intro/authority.html)为准。
 
 ## 命令
 

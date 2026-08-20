@@ -15,7 +15,7 @@ Alpha Guard 是面向港股和美股个人投资者的自托管、只读、证�
 - Signal Plane 检查用户预先写下的规则，输出三态规则证据与五态人工核验决策；
 - Silence Plane 检查扫描责任、数据新鲜度、provider 能力、送达和状态完整性，回答系统是否有资格保持安静。
 
-Alpha Guard 不荐股，不预测短期涨跌，也不允许 AI 修改硬规则。券商连接是可选且默认关闭的 Futu OpenAPI 集成：实时行情与规则触发的自动交易需要多层显式开关，默认 dry-run 只审计不下单，live 模式要求人工确认。`BUY_REVIEW` 和 `SELL_REVIEW` 只是人工核验类别。数据、新闻、AI 结果、颜色和提醒均不构成投资建议。
+Alpha Guard 不荐股，不预测短期涨跌，也不允许 AI 修改硬规则。可选的 Futu OpenAPI 集成只读取本机 OpenD 行情，不接收券商凭据、不解锁交易、不提交订单。`BUY_REVIEW` 和 `SELL_REVIEW` 只是人工核验类别。数据、新闻、AI 结果、颜色和提醒均不构成投资建议。
 
 ## 当前产品与未来产品
 

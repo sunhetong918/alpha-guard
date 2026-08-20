@@ -59,9 +59,7 @@ class TradingExecutor:
             return record
 
         intent = self._intent(ticker, snapshot, evaluation, policy)
-        outcome = self._broker.place_order(intent)
-        if outcome.status == "submitted":
-            self._guard.record_placement(ticker)
+        outcome = self._broker.record_intent(intent)
         record = TradeAuditRecord(
             intent=intent,
             guard_allowed=True,
