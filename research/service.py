@@ -36,6 +36,7 @@ class ResearchOptions(BaseModel):
     media_enabled: bool = False
     max_media_items: int = Field(default=2, ge=1, le=5)
     max_media_seconds: int = Field(default=600, ge=60, le=600)
+    model_profile_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def validate_selections(self) -> ResearchOptions:
@@ -114,6 +115,8 @@ class ResearchService:
         self._stage = "idle"
         self._next_run_at: str | None = None
         self._last_run: dict[str, Any] | None = None
+        # Set by the Guardian when the digest scheduler exists; CLI sessions stay null.
+        self.digest_scheduler: Any | None = None
 
     def _options(self) -> ResearchOptions:
         with ResearchStore(self.path) as store:
@@ -137,8 +140,14 @@ class ResearchService:
         from .model_provider import model_capabilities
 
         environment = get_settings()
+        from .model_profiles import active_model_profile, profile_public
+
+        with ResearchStore(self.path) as store:
+            profiles = store.list_model_profiles()
+            active = active_model_profile(store)
         capabilities = {
-            **model_capabilities(environment),
+            **model_capabilities(environment, active),
+            "model_profile_active": profile_public(active) if active is not None else None,
             "transcription_configured": bool(environment.transcription_command),
             "browser_enabled": environment.research_browser_enabled,
             "browser_mode": environment.research_browser_mode,
@@ -158,6 +167,14 @@ class ResearchService:
             }
         with ResearchStore(self.path) as store:
             options = ResearchOptions.model_validate(store.load_settings() or {})
+            model_profiles = [profile_public(profile) for profile in profiles]
+            from .digest import digest_snapshot
+
+            scheduler_runtime = {"state": "STOPPED", "next_run_at": None}
+            if self.digest_scheduler is not None:
+                scheduler_runtime = {"state": self.digest_scheduler.state,
+                                     "next_run_at": self.digest_scheduler.next_run_at}
+            digest = digest_snapshot(self.path, runtime=scheduler_runtime)
             # Fetch one bounded SQL page plus a sentinel; never load the full
             # article archive to construct a compact desktop list.
             limit = min(page_size + 1, max(0, window_limit - offset))
@@ -205,6 +222,8 @@ class ResearchService:
             "runtime": runtime,
             "capabilities": capabilities,
             "settings": options.model_dump(mode="json"),
+            "model_profiles": model_profiles,
+            "digest": digest,
             "subscriptions": subscriptions[:page_size],
             "evidence": evidence,
             "reports": reports,
@@ -213,10 +232,16 @@ class ResearchService:
         }
 
     def detail(self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0, full: bool = False) -> dict[str, Any]:
-        if kind not in {"evidence", "report"} or not identity or len(identity) > 128:
+        if kind not in {"evidence", "report", "digest"} or not identity or len(identity) > 128:
             raise ValueError("invalid research detail")
         if type(offset) is not int or type(segment_offset) is not int or min(offset, segment_offset) < 0:
             raise ValueError("invalid detail offset")
+        if kind == "digest":
+            with ResearchStore(self.path) as store:
+                record = store.get_digest(identity)
+            if record is None:
+                raise ValueError("research item not found")
+            return record
         with ResearchStore(self.path) as store:
             item = store.get_evidence(identity) if kind == "evidence" else store.get_report(identity)
             conflicts = store.conflicting_profiles() if kind == "report" else set()
@@ -268,7 +293,12 @@ class ResearchService:
         return report
 
     def configure(self, values: Mapping[str, Any]) -> dict[str, Any]:
-        options = ResearchOptions.model_validate(dict(values))
+        payload = dict(values)
+        if "model_profile_id" not in payload and self.path.exists():
+            # Older settings files predate profiles; keep the saved activation.
+            with ResearchStore(self.path) as store:
+                payload["model_profile_id"] = store.load_settings().get("model_profile_id")
+        options = ResearchOptions.model_validate(payload)
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise ValueError("stop monitoring before changing research settings")
@@ -323,6 +353,105 @@ class ResearchService:
         item = ingest_text(**dict(values))
         with ResearchStore(self.path) as store:
             return _public(store.upsert_evidence(item))
+
+    def list_model_profiles(self) -> list[dict[str, Any]]:
+        from .model_profiles import profile_public
+
+        with ResearchStore(self.path) as store:
+            return [profile_public(profile) for profile in store.list_model_profiles()]
+
+    def save_model_profile(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Upsert one profile; a supplied api_key only ever reaches the key store."""
+        from datetime import UTC as _UTC
+
+        from .model_key_store import ModelKeyStore
+        from .model_profiles import build_profile, profile_public
+
+        if not isinstance(values, dict) or not isinstance(values.get("profile"), dict):
+            raise ValueError("invalid model profile payload")
+        api_key = values.get("api_key")
+        if api_key is not None and not isinstance(api_key, str):
+            raise ValueError("invalid model key")
+        payload = dict(values["profile"])
+        with ResearchStore(self.path) as store:
+            identity = str(payload.get("id") or "")
+            existing = store.get_model_profile(identity) if identity else None
+            if identity and existing is None:
+                raise ValueError("model profile not found")
+            profile = build_profile(payload, existing=existing)
+            keys = ModelKeyStore()
+            if api_key:
+                keys.save(profile.id, api_key)
+                profile = profile.model_copy(update={
+                    "key_configured": True,
+                    "key_updated_at": datetime.now(_UTC).isoformat(),
+                })
+            elif api_key == "" and existing is not None and existing.key_configured:
+                keys.delete(profile.id)
+                profile = profile.model_copy(update={"key_configured": False, "key_updated_at": None})
+            saved = store.save_model_profile(profile)
+        return profile_public(saved)
+
+    def delete_model_profile(self, identity: str) -> None:
+        from .model_key_store import ModelKeyStore
+
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            raise ValueError("invalid model profile id")
+        with ResearchStore(self.path) as store:
+            if store.get_model_profile(identity) is None:
+                raise ValueError("model profile not found")
+            settings = store.load_settings()
+            if settings.get("model_profile_id") == identity:
+                settings["model_profile_id"] = None
+                store.save_settings(settings)
+            store.delete_model_profile(identity)
+        ModelKeyStore().delete(identity)
+
+    def activate_model_profile(self, identity: str | None) -> dict[str, Any]:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise ValueError("stop monitoring before changing research settings")
+            with ResearchLease(self.path), ResearchStore(self.path) as store:
+                settings = store.load_settings()
+                if identity is not None:
+                    profile = store.get_model_profile(identity)
+                    if profile is None or not profile.enabled:
+                        raise ValueError("model profile not found or disabled")
+                settings["model_profile_id"] = identity
+                store.save_settings(settings)
+                return {"model_profile_id": identity}
+
+    def test_model_profile(self, identity: str) -> dict[str, Any]:
+        from .model_key_store import ModelKeyStore
+        from .model_provider import test_model_connection
+
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            raise ValueError("invalid model profile id")
+        with ResearchStore(self.path) as store:
+            profile = store.get_model_profile(identity)
+            if profile is None:
+                raise ValueError("model profile not found")
+        api_key = None
+        try:
+            api_key = ModelKeyStore().load(profile.id)
+        except Exception:  # noqa: BLE001 - a broken key store is a bounded test failure
+            return {"status": "failed", "detail": "model_key_unavailable"}
+        return test_model_connection(profile, api_key)
+
+    def save_digest_settings(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        from .models import DigestSettings
+
+        options = DigestSettings.model_validate(dict(values))
+        with ResearchStore(self.path) as store:
+            result = store.save_digest_settings(options)
+        if self.digest_scheduler is not None:
+            self.digest_scheduler.restart()
+        return result
+
+    def run_digest_once(self) -> dict[str, Any]:
+        from .digest import submit_manual_digest
+
+        return submit_manual_digest(self.path)
 
     def launch(self, *, continuous: bool = False, media: Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:

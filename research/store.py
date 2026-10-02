@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
-    EvidenceRecord, ExtractionResult, ResearchInstrument, ResearchReport,
-    Subscription, aware, digest, evidence_from_item, parse_time,
+    DigestSettings, EvidenceRecord, ExtractionResult, ModelProfile,
+    ResearchInstrument, ResearchReport, Subscription, aware, digest,
+    evidence_from_item, parse_time,
 )
 
 _SCHEMA = """
@@ -45,12 +46,23 @@ CREATE TABLE IF NOT EXISTS research_runs (
 CREATE TABLE IF NOT EXISTS research_settings (
  id INTEGER PRIMARY KEY CHECK (id = 1), payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_model_profiles (
+ id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_digest_settings (
+ id INTEGER PRIMARY KEY CHECK (id = 1), payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_digests (
+ id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_digests_time ON research_digests(created_at DESC);
 """
 _DEFAULT_SETTINGS: dict[str, Any] = {
     "markets": ["US", "HK"], "horizons": ["swing", "long"], "instruments": [],
     "interval_minutes": 15, "ai_enabled": False, "news_enabled": True,
     "news_sources": [], "max_items": 20, "max_ai_calls": 10,
     "media_enabled": False, "max_media_items": 2, "max_media_seconds": 600,
+    "model_profile_id": None,
 }
 
 
@@ -79,6 +91,11 @@ def _settings(value: Mapping[str, Any]) -> dict[str, Any]:
                            ("max_media_items", 1, 5), ("max_media_seconds", 60, 600)):
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValueError(f"{key} is out of range")
+    profile_id = result["model_profile_id"]
+    if profile_id is not None and (not isinstance(profile_id, str)
+                                   or not 1 <= len(profile_id) <= 64
+                                   or any(character.isspace() for character in profile_id)):
+        raise ValueError("model_profile_id must be null or a compact identifier")
     instruments = [ResearchInstrument.model_validate(i) for i in result["instruments"]]
     if len({i.key for i in instruments}) != len(instruments):
         raise ValueError("duplicate research instrument")
@@ -445,11 +462,106 @@ class ResearchStore:
 
     def save_settings(self, settings: Mapping[str, Any]) -> None:
         payload = json.dumps(_settings(settings), ensure_ascii=False, allow_nan=False)
+        profile_id = json.loads(payload)["model_profile_id"]
+        if profile_id is not None:
+            row = self._connection.execute(
+                "SELECT 1 FROM research_model_profiles WHERE id=?", (profile_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("active model profile does not exist")
         with self._lock, self._connection:
             self._connection.execute(
                 "INSERT INTO research_settings VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json",
                 (payload,),
             )
+
+    def list_model_profiles(self) -> list[ModelProfile]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload_json FROM research_model_profiles ORDER BY updated_at DESC, rowid DESC"
+            ).fetchall()
+        return [ModelProfile.model_validate_json(row[0]) for row in rows]
+
+    def get_model_profile(self, identity: str) -> ModelProfile | None:
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload_json FROM research_model_profiles WHERE id=?", (identity,)
+            ).fetchone()
+        return ModelProfile.model_validate_json(row[0]) if row else None
+
+    def save_model_profile(self, profile: ModelProfile, *, max_profiles: int = 20) -> ModelProfile:
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT 1 FROM research_model_profiles WHERE id=?", (profile.id,)
+            ).fetchone()
+            if existing is None:
+                count = self._connection.execute("SELECT COUNT(*) FROM research_model_profiles").fetchone()[0]
+                if count >= max_profiles:
+                    raise ValueError("at most 20 model profiles are supported")
+            self._connection.execute(
+                "INSERT INTO research_model_profiles VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                (profile.id, profile.model_dump_json(), profile.updated_at),
+            )
+        return profile
+
+    def delete_model_profile(self, identity: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM research_model_profiles WHERE id=?", (identity,))
+
+    def load_digest_settings(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload_json FROM research_digest_settings WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return DigestSettings().model_dump(mode="json")
+        return DigestSettings.model_validate_json(row[0]).model_dump(mode="json")
+
+    def save_digest_settings(self, settings: Mapping[str, Any] | DigestSettings) -> dict[str, Any]:
+        value = settings if isinstance(settings, DigestSettings) else DigestSettings.model_validate(dict(settings))
+        payload = value.model_dump_json()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO research_digest_settings VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json",
+                (payload,),
+            )
+        return value.model_dump(mode="json")
+
+    def save_digest_record(self, record: Mapping[str, Any]) -> None:
+        import uuid as _uuid
+
+        identity = str(record.get("id") or _uuid.uuid4().hex)
+        created_at = str(record.get("created_at") or "")
+        if not created_at:
+            raise ValueError("digest record requires created_at")
+        payload = json.dumps(record, ensure_ascii=False, allow_nan=False)
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO research_digests VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json",
+                (identity, created_at, payload),
+            )
+
+    def list_digests(self, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload_json FROM research_digests ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (_limit(limit), _offset(offset)),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_digest(self, identity: str) -> dict[str, Any] | None:
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload_json FROM research_digests WHERE id=?", (identity,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
 
 def _limit(value: int) -> int:

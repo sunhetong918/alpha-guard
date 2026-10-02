@@ -91,6 +91,12 @@ def main() -> int:
         # acquired before the scheduler can touch SQLite or external channels.
         server.start()
         runtime.start()
+        # An explicitly enabled daily digest resumes with the Guardian; a
+        # digest that was never enabled or was switched off stays dormant.
+        try:
+            backend.start_digest_schedule()
+        except Exception:  # noqa: BLE001 - startup boundary must not leak secrets
+            logger.warning("Digest schedule resume failed")
     except GuardianInstanceAlreadyRunning:
         return 0
     except (OSError, QtTransportError):

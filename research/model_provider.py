@@ -40,13 +40,22 @@ def claude_executable(settings: Settings) -> str | None:
     return None
 
 
-def model_identity(settings: Settings) -> str:
+def model_identity(settings: Settings, profile: Any | None = None) -> str:
+    if profile is not None:
+        from .model_profiles import profile_identity
+
+        return profile_identity(profile)
     if settings.research_model_provider == "codex_cli":
         return f"codex_cli:{settings.research_codex_model}"
     return f"{settings.research_model_provider}:{settings.anthropic_model}"
 
 
-def model_capabilities(settings: Settings) -> dict[str, Any]:
+def model_capabilities(settings: Settings, profile: Any | None = None) -> dict[str, Any]:
+    if profile is not None:
+        return {"model_provider": f"profile:{profile.name}", "model_protocol": profile.protocol,
+                "model_configured": True, "model_installed": True,
+                "model_authentication": "api_key" if profile.key_configured else "key_optional",
+                "model_endpoint_private": profile.allow_private_network}
     if settings.research_model_provider == "codex_cli":
         available = codex_executable(settings) is not None
         return {"model_provider": "codex_cli", "model_configured": available,
@@ -200,9 +209,80 @@ def _claude_text(prompt: str, settings: Settings, *, system: str,
             return text
 
 
+def _profile_text(prompt: str, profile: Any, api_key: str | None, *, system: str,
+                  cancelled: Callable[[], bool] | None) -> str:
+    from .model_http import model_post_json
+    from .network import ContentAccessError
+
+    max_tokens = 6000
+    if profile.protocol == "anthropic_compatible":
+        payload = {"model": profile.model, "max_tokens": max_tokens, "system": system,
+                   "messages": [{"role": "user", "content": prompt}]}
+        path = "/v1/messages"
+    else:
+        payload = {"model": profile.model, "max_tokens": max_tokens, "stream": False,
+                   "messages": [{"role": "system", "content": system},
+                                {"role": "user", "content": prompt}]}
+        path = "/chat/completions"
+    try:
+        data = model_post_json(endpoint=profile.base_url, path=path, payload=payload,
+                               api_key=api_key, protocol=str(profile.protocol),
+                               timeout_seconds=float(profile.timeout_seconds),
+                               allow_private=bool(profile.allow_private_network),
+                               cancelled=cancelled)
+    except ContentAccessError as exc:
+        raise ModelProviderError(str(exc)) from None
+    text: Any = None
+    if profile.protocol == "anthropic_compatible":
+        content = data.get("content")
+        if isinstance(content, list):
+            text = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    else:
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                text = message.get("content")
+    if not isinstance(text, str) or not text or len(text) > 100_000:
+        raise ModelProviderError("invalid_model_response")
+    return text
+
+
+def test_model_connection(profile: Any, api_key: str | None,
+                           *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """One minimal real request; the receipt has no raw provider diagnostics."""
+    from .model_http import model_post_json
+    from .network import ContentAccessError
+
+    started = time.monotonic()
+    anthropic_protocol = profile.protocol == "anthropic_compatible"
+    payload: dict[str, Any] = {"model": profile.model, "max_tokens": 16,
+                               "messages": [{"role": "user", "content": "Reply with exactly: ok"}]}
+    if not anthropic_protocol:
+        payload["stream"] = False
+    try:
+        data = model_post_json(
+            endpoint=profile.base_url,
+            path="/v1/messages" if anthropic_protocol else "/chat/completions",
+            payload=payload, api_key=api_key, protocol=str(profile.protocol),
+            timeout_seconds=min(float(profile.timeout_seconds), 30.0),
+            allow_private=bool(profile.allow_private_network), cancelled=cancelled)
+    except ContentAccessError as exc:
+        return {"status": "failed", "detail": str(exc), "elapsed_seconds": time.monotonic() - started}
+    if not isinstance(data, dict):
+        return {"status": "failed", "detail": "invalid_model_response",
+                "elapsed_seconds": time.monotonic() - started}
+    return {"status": "success", "elapsed_seconds": time.monotonic() - started}
+
+
 def extract_text(prompt: str, settings: Settings, *, system: str,
                  client: Any | None = None,
-                 cancelled: Callable[[], bool] | None = None) -> str:
+                 cancelled: Callable[[], bool] | None = None,
+                 profile: Any | None = None, api_key: str | None = None) -> str:
+    if profile is not None:
+        if cancelled and cancelled():
+            raise ModelCancelled("model_cancelled")
+        return _profile_text(prompt, profile, api_key, system=system, cancelled=cancelled)
     if client is None and settings.research_model_provider == "codex_cli":
         return _codex_text(prompt, settings, system=system, cancelled=cancelled)
     if client is None and settings.research_model_provider == "claude_cli":

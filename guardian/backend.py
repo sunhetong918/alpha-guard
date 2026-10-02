@@ -159,13 +159,26 @@ class AlphaGuardBackend(GuardianBackend):
         self._autostart_apply = autostart_apply
         self._started_at = clock().astimezone(UTC)
         self._research: ResearchService | None = None
+        self._digest_scheduler: Any | None = None
 
     def _research_service(self) -> ResearchService:
         if self._research is None:
             from research.service import ResearchService
 
             self._research = ResearchService(STATE_PATH)
+            if self._digest_scheduler is not None:
+                self._research.digest_scheduler = self._digest_scheduler
         return self._research
+
+    def start_digest_schedule(self) -> bool:
+        """Resume an explicitly enabled daily digest after Guardian restart."""
+        from research.digest import DigestScheduler
+
+        if self._digest_scheduler is None:
+            self._digest_scheduler = DigestScheduler(STATE_PATH)
+            if self._research is not None:
+                self._research.digest_scheduler = self._digest_scheduler
+        return self._digest_scheduler.start_if_enabled()
 
     def research_get(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
         del context
@@ -199,7 +212,11 @@ class AlphaGuardBackend(GuardianBackend):
             ) from None
 
     def close_research(self) -> None:
+        if self._digest_scheduler is not None:
+            self._digest_scheduler.stop()
+            self._digest_scheduler = None
         if self._research is not None:
+            self._research.digest_scheduler = None
             self._research.close()
 
     def _now(self) -> datetime:

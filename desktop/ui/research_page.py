@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QTime, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +50,19 @@ PLATFORMS = {
     "douyin": "抖音",
     "xiaohongshu": "小红书",
     "rss": "RSS / Atom",
+}
+DIGEST_AI_STATUSES = {
+    "generated": "已生成",
+    "rejected": "模型输出未通过核验，已回退确定性摘要",
+    "unavailable": "模型不可用，保留确定性摘要",
+    "disabled": "未开启",
+}
+DIGEST_DELIVERY_STATUSES = {
+    "sent": "已发送",
+    "already_sent": "本轮已发送过",
+    "not_configured": "未配置通知通道",
+    "failed": "发送失败",
+    "skipped": "未开启投递",
 }
 STATUSES = {
     "STOPPED": "已停止",
@@ -261,6 +276,7 @@ class ResearchPage(QWidget):
         self._loaded = False
         self._active = False
         self._dirty = False
+        self._digest_dirty = False
         self._loading_settings = False
         self._pending: set[str] = set()
         self._selected: dict[str, str] = {}
@@ -329,6 +345,8 @@ class ResearchPage(QWidget):
         self._build_subscriptions()
         self._build_settings()
         self._build_import()
+        self._build_models()
+        self._build_digest()
         self.run_detail = QTextBrowser()
         self.run_detail.setOpenExternalLinks(False)
         self.run_detail.setPlainText(
@@ -656,11 +674,141 @@ class ResearchPage(QWidget):
         scroll.setWidget(panel)
         self.tabs.addTab(scroll, title)
 
+    def _build_models(self) -> None:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(_label(
+            "用自己的 API key 接入 OpenAI 兼容或 Anthropic 兼容服务；密钥只存本机钥匙串，"
+            "激活一个 profile 后 AI 分析改用它，留空则沿用环境变量提供者。"
+        ))
+        self.model_table = _table(["名称", "协议", "模型", "端点", "密钥", "状态"])
+        self.model_table.setMinimumHeight(140)
+        self.model_table.itemSelectionChanged.connect(self._show_model_status)
+        layout.addWidget(self.model_table, 1)
+        form = QFormLayout()
+        self.model_name = QLineEdit()
+        self.model_name.setPlaceholderText("例如 公司名-模型名")
+        self.model_protocol = QComboBox()
+        self.model_protocol.addItem("OpenAI 兼容 /chat/completions", "openai_compatible")
+        self.model_protocol.addItem("Anthropic 兼容 /v1/messages", "anthropic_compatible")
+        self.model_url = QLineEdit()
+        self.model_url.setPlaceholderText("https://api.example.com/v1（公网须 HTTPS）")
+        self.model_id_input = QLineEdit()
+        self.model_id_input.setPlaceholderText("例如 gpt-5.5、deepseek-chat")
+        self.model_key = QLineEdit()
+        self.model_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.model_key.setPlaceholderText("输入新密钥以更新；留空保留已存密钥")
+        self.model_timeout = QSpinBox()
+        self.model_timeout.setRange(5, 600)
+        self.model_timeout.setSuffix(" 秒")
+        self.model_timeout.setValue(180)
+        self.model_private = QCheckBox("允许本机/私网端点（Ollama、LM Studio 等）")
+        self.model_enabled = QCheckBox("启用该 profile")
+        self.model_enabled.setChecked(True)
+        form.addRow("名称", self.model_name)
+        form.addRow("协议", self.model_protocol)
+        form.addRow("端点", self.model_url)
+        form.addRow("模型", self.model_id_input)
+        form.addRow("API 密钥", self.model_key)
+        form.addRow("超时", self.model_timeout)
+        form.addRow("", self.model_private)
+        form.addRow("", self.model_enabled)
+        layout.addLayout(form)
+        actions = QHBoxLayout()
+        self.model_save_button = QPushButton("保存 / 新建")
+        self.model_save_button.setProperty("primary", True)
+        self.model_delete_button = QPushButton("删除所选")
+        self.model_activate_button = QPushButton("激活所选")
+        self.model_deactivate_button = QPushButton("停用（回退环境变量）")
+        self.model_test_button = QPushButton("测试连接")
+        self.model_save_button.clicked.connect(self._save_model_profile)
+        self.model_delete_button.clicked.connect(self._delete_model_profile)
+        self.model_activate_button.clicked.connect(self._activate_model_profile)
+        self.model_deactivate_button.clicked.connect(self._deactivate_model_profile)
+        self.model_test_button.clicked.connect(self._test_model_profile)
+        for button in (self.model_save_button, self.model_delete_button,
+                       self.model_activate_button, self.model_deactivate_button,
+                       self.model_test_button):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.model_status = _label("尚未保存模型 profile。")
+        layout.addWidget(self.model_status)
+        panel.setMinimumHeight(520)
+        self._add_scroll_tab(panel, "模型")
+
+    def _build_digest(self) -> None:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(_label(
+            "按关注清单生成每日摘要：证券沿用研究设置的“关注股票”，主题在此填写；"
+            "默认关闭，显式开启后 Guardian 重启也会按设定时刻继续执行。"
+        ))
+        form = QFormLayout()
+        self.digest_enabled = QCheckBox("开启每日摘要")
+        self.digest_time = QTimeEdit()
+        self.digest_time.setDisplayFormat("HH:mm")
+        self.digest_time.setTime(QTime(8, 0))
+        self.digest_topics = QPlainTextEdit()
+        self.digest_topics.setPlaceholderText(
+            "每行一个主题：标签: 关键词1, 关键词2\n例如\n半导体: 芯片, 光刻, 先进制程\n创新药: 临床, FDA"
+        )
+        self.digest_topics.setMinimumHeight(80)
+        self.digest_ai = QCheckBox("AI 汇总（每轮最多一次模型调用）")
+        self.digest_notify = QCheckBox("推送到已配置的通知通道")
+        self.digest_max_items = QSpinBox()
+        self.digest_max_items.setRange(1, 100)
+        self.digest_max_items.setValue(20)
+        for widget in (self.digest_enabled, self.digest_ai, self.digest_notify):
+            widget.toggled.connect(self._mark_digest_dirty)
+        self.digest_time.timeChanged.connect(self._mark_digest_dirty)
+        self.digest_topics.textChanged.connect(self._mark_digest_dirty)
+        self.digest_max_items.valueChanged.connect(self._mark_digest_dirty)
+        form.addRow("计划", self.digest_enabled)
+        form.addRow("每日时刻", self.digest_time)
+        form.addRow("主题", self.digest_topics)
+        form.addRow("", self.digest_ai)
+        form.addRow("", self.digest_notify)
+        form.addRow("每组条目上限", self.digest_max_items)
+        layout.addLayout(form)
+        actions = QHBoxLayout()
+        self.digest_save_button = QPushButton("保存摘要设置")
+        self.digest_save_button.setProperty("primary", True)
+        self.digest_run_button = QPushButton("立即生成一次")
+        self.digest_save_button.clicked.connect(self._save_digest_settings)
+        self.digest_run_button.clicked.connect(self._run_digest_once)
+        actions.addWidget(self.digest_save_button)
+        actions.addWidget(self.digest_run_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.digest_status = _label("每日摘要默认关闭。")
+        layout.addWidget(self.digest_status)
+        self.digest_history = _table(["生成时间", "触发", "状态", "命中/窗口"])
+        self.digest_history.setMinimumHeight(110)
+        self.digest_history.itemSelectionChanged.connect(self._show_digest_record)
+        layout.addWidget(_label("历史摘要（选择一行查看完整内容；离线读取）。"))
+        layout.addWidget(self.digest_history)
+        self.digest_detail = QTextBrowser()
+        self.digest_detail.setOpenExternalLinks(False)
+        self.digest_detail.setPlainText("尚无摘要。开启计划或点击“立即生成一次”。")
+        layout.addWidget(self.digest_detail, 1)
+        panel.setMinimumHeight(520)
+        self._add_scroll_tab(panel, "每日摘要")
+
     def _mark_dirty(self, *_args: object) -> None:
         if self._loading_settings:
             return
         self._dirty = True
         self.message_label.setText("研究设置有未保存修改，保存后可开始扫描。")
+        self._update_controls()
+
+    def _mark_digest_dirty(self, *_args: object) -> None:
+        if self._loading_settings:
+            return
+        self._digest_dirty = True
+        self.digest_status.setText("摘要设置有未保存修改。")
         self._update_controls()
 
     def _save_settings(self) -> None:
@@ -873,6 +1021,220 @@ class ResearchPage(QWidget):
             },
         )
 
+    def _selected_model(self) -> dict[str, Any] | None:
+        row = self.model_table.currentRow()
+        profiles = self._snapshot.get("model_profiles")
+        if row < 0 or not isinstance(profiles, list) or row >= len(profiles):
+            return None
+        profile = profiles[row]
+        return profile if isinstance(profile, dict) else None
+
+    def _show_model_status(self) -> None:
+        profile = self._selected_model()
+        if profile is None:
+            self.model_status.setText("选择一个 profile 查看状态，或直接填写新 profile。")
+            return
+        active = (self._snapshot.get("capabilities") or {}).get("model_profile_active") or {}
+        state = "当前激活" if active.get("id") == profile.get("id") else ("启用" if profile.get("enabled") else "已停用")
+        key = "已配置" if profile.get("key_configured") else "未配置（本机推理可不填）"
+        self.model_status.setText(
+            f"{profile.get('name')} · {state} · 密钥{key} · {profile.get('protocol')}"
+        )
+        self.model_name.setText(str(profile.get("name") or ""))
+        self.model_protocol.setCurrentIndex(
+            1 if profile.get("protocol") == "anthropic_compatible" else 0)
+        self.model_url.setText(str(profile.get("base_url") or ""))
+        self.model_id_input.setText(str(profile.get("model") or ""))
+        self.model_timeout.setValue(int(profile.get("timeout_seconds") or 180))
+        self.model_private.setChecked(profile.get("allow_private_network") is True)
+        self.model_enabled.setChecked(profile.get("enabled") is not False)
+        self.model_key.clear()
+
+    def _save_model_profile(self) -> None:
+        profile = self._selected_model()
+        payload: dict[str, Any] = {
+            "name": self.model_name.text().strip(),
+            "protocol": self.model_protocol.currentData(),
+            "base_url": self.model_url.text().strip(),
+            "model": self.model_id_input.text().strip(),
+            "timeout_seconds": float(self.model_timeout.value()),
+            "allow_private_network": self.model_private.isChecked(),
+            "enabled": self.model_enabled.isChecked(),
+        }
+        fields: dict[str, Any] = {"profile": payload}
+        if profile is not None:
+            payload["id"] = profile.get("id")
+        if self.model_key.text():
+            fields["api_key"] = self.model_key.text()
+        self._send("model_save", fields)
+
+    def _delete_model_profile(self) -> None:
+        profile = self._selected_model()
+        if profile is None:
+            self.message_label.setText("请先在表格中选择要删除的模型 profile。")
+            return
+        confirm = QMessageBox.question(
+            self, "删除模型 profile",
+            f"删除 {profile.get('name')}？其密钥会一并从钥匙串移除。",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._send("model_delete", {"id": profile.get("id")})
+
+    def _activate_model_profile(self) -> None:
+        profile = self._selected_model()
+        if profile is None:
+            self.message_label.setText("请先在表格中选择要激活的模型 profile。")
+            return
+        self._send("model_activate", {"id": profile.get("id")})
+
+    def _deactivate_model_profile(self) -> None:
+        self._send("model_activate", {"id": ""})
+
+    def _test_model_profile(self) -> None:
+        profile = self._selected_model()
+        if profile is None:
+            self.message_label.setText("请先在表格中选择要测试的模型 profile。")
+            return
+        confirm = QMessageBox.question(
+            self, "测试连接",
+            "将向该 profile 发起一次极小的真实模型请求（可能产生费用）。继续？",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._send("model_test", {"id": profile.get("id")})
+
+    def _save_digest_settings(self) -> None:
+        topics = []
+        for line in self.digest_topics.toPlainText().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            label, _, rest = line.partition(":")
+            keywords = [value.strip() for value in rest.split(",") if value.strip()]
+            topics.append({"label": label.strip(), "keywords": keywords[:8]})
+        value = {
+            "enabled": self.digest_enabled.isChecked(),
+            "time_local": self.digest_time.time().toString("HH:mm"),
+            "topics": topics[:20],
+            "ai_summary": self.digest_ai.isChecked(),
+            "notify": self.digest_notify.isChecked(),
+            "max_items": self.digest_max_items.value(),
+        }
+        self._send("digest_save", {"settings": value})
+
+    def _run_digest_once(self) -> None:
+        self._send("digest_once")
+
+    def _populate_models(self) -> None:
+        profiles = self._snapshot.get("model_profiles")
+        if not isinstance(profiles, list):
+            profiles = []
+        active = (self._snapshot.get("capabilities") or {}).get("model_profile_active") or {}
+        self.model_table.setRowCount(0)
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            row = self.model_table.rowCount()
+            self.model_table.insertRow(row)
+            values = [
+                str(profile.get("name") or ""),
+                "Anthropic 兼容" if profile.get("protocol") == "anthropic_compatible" else "OpenAI 兼容",
+                str(profile.get("model") or ""),
+                str(profile.get("base_url") or ""),
+                "已配置" if profile.get("key_configured") else "未配置",
+                ("当前激活 · " if active.get("id") == profile.get("id") else "")
+                + ("启用" if profile.get("enabled") else "已停用"),
+            ]
+            for column, value in enumerate(values):
+                self.model_table.setItem(row, column, QTableWidgetItem(value))
+
+    def _populate_digest(self) -> None:
+        digest = self._snapshot.get("digest")
+        if not isinstance(digest, dict):
+            return
+        settings = digest.get("settings") or {}
+        plan = digest.get("plan") or {}
+        if not self._digest_dirty:
+            self._loading_settings = True
+            try:
+                self.digest_enabled.setChecked(settings.get("enabled") is True)
+                hour, minute = str(settings.get("time_local") or "08:00").split(":", 1)
+                self.digest_time.setTime(QTime(int(hour), int(minute)))
+                self.digest_topics.setPlainText("\n".join(
+                    f"{topic.get('label')}: " + ", ".join(str(v) for v in (topic.get("keywords") or []))
+                    for topic in settings.get("topics") or [] if isinstance(topic, dict)))
+                self.digest_ai.setChecked(settings.get("ai_summary") is True)
+                self.digest_notify.setChecked(settings.get("notify") is True)
+                self.digest_max_items.setValue(int(settings.get("max_items") or 20))
+            finally:
+                self._loading_settings = False
+        state = "已开启" if settings.get("enabled") else "已关闭"
+        nxt = f" · 下次 {_time(plan.get('next_run_at'))}" if plan.get("next_run_at") else ""
+        self.digest_status.setText(f"每日摘要{state}{nxt}；“热点”仅为已配置来源内的相对排序。")
+        history = digest.get("history")
+        self._digest_history_ids = [
+            str(record.get("id")) for record in history if isinstance(record, dict)
+        ] if isinstance(history, list) else []
+        self.digest_history.setRowCount(0)
+        for record in history if isinstance(history, list) else []:
+            if not isinstance(record, dict):
+                continue
+            counts = record.get("counts") or {}
+            row = self.digest_history.rowCount()
+            self.digest_history.insertRow(row)
+            for column, value in enumerate([
+                _time(record.get("created_at")),
+                "计划" if record.get("trigger") == "schedule" else "手动",
+                STATUSES.get(str(record.get("status")), str(record.get("status"))),
+                f"{counts.get('matched', 0)}/{counts.get('evidence_window', 0)}",
+            ]):
+                self.digest_history.setItem(row, column, QTableWidgetItem(str(value)))
+        latest = digest.get("latest")
+        self.digest_detail.setHtml(self._digest_html(latest) if isinstance(latest, dict) else
+                                   "尚无摘要。开启计划或点击“立即生成一次”。")
+
+    def _show_digest_record(self) -> None:
+        row = self.digest_history.currentRow()
+        if row < 0 or row >= len(getattr(self, "_digest_history_ids", [])):
+            return
+        identity = self._digest_history_ids[row]
+        self._selected["digest"] = identity
+        self.client.research_detail("digest", identity)
+
+    @staticmethod
+    def _digest_html(latest: dict[str, Any]) -> str:
+        parts = [
+            f"<h2>最近摘要 · {_escape(_time(latest.get('created_at')))}</h2>",
+            f"<p>{_escape(STATUSES.get(str(latest.get('status')), '未知'))}"
+            + (f" · {_escape(str(latest.get('detail')))}" if latest.get("detail") else "") + "</p>",
+        ]
+        counts = latest.get("counts") or {}
+        parts.append(
+            f"<p>窗口材料 {_escape(counts.get('evidence_window', 0))} 条 · "
+            f"命中 {_escape(counts.get('matched', 0))} 条 · 分组 {_escape(counts.get('sections', 0))} 个</p>"
+        )
+        ai = latest.get("ai_summary") or {}
+        if ai.get("enabled"):
+            parts.append(f"<p>AI 汇总：{_escape(DIGEST_AI_STATUSES.get(str(ai.get('status')), str(ai.get('status'))))}</p>")
+        delivery = latest.get("delivery") or {}
+        if delivery.get("enabled"):
+            parts.append(f"<p>投递：{_escape(DIGEST_DELIVERY_STATUSES.get(str(delivery.get('status')), str(delivery.get('status'))))}</p>")
+        for section in latest.get("sections") or []:
+            entries = section.get("entries") or []
+            summary = (ai.get("sections") or {}).get(section.get("key"))
+            block = [f"<h3>{_escape(section.get('label'))}（{len(entries)} 条）</h3>"]
+            if isinstance(summary, str) and summary:
+                block.append(f"<p>{_escape(summary)}</p>")
+            block.append("<ul>" + "".join(
+                f"<li>{_source_link(str(entry.get('source_url') or ''), str(entry.get('title') or '（无标题）'), _safe_url)}</li>"
+                for entry in entries) + "</ul>")
+            parts.append("".join(block))
+        gaps = latest.get("coverage_gaps") or []
+        if gaps:
+            parts.append("<p>覆盖说明：" + "；".join(_escape(ISSUES.get(str(gap), str(gap))) for gap in gaps) + "</p>")
+        return "".join(parts)
+
     def _send(self, command: str, fields: dict[str, Any] | None = None) -> None:
         if command in self._pending:
             return
@@ -895,6 +1257,8 @@ class ResearchPage(QWidget):
         if receipt.accepted:
             if command == "configure":
                 self._dirty = False
+            if command == "digest_save":
+                self._digest_dirty = False
             if "演示" not in receipt.message:
                 if command in {"once", "start", "transcribe"}:
                     self._runtime_state = "RUNNING"
@@ -911,6 +1275,11 @@ class ResearchPage(QWidget):
                 "start": "已开启自动跟踪。",
                 "stop": "停止请求已接受。",
                 "open_login": "已请求打开专用 Chrome 的平台主页。请在窗口中自行登录；尚未验证登录成功。完成后可手动扫描。",
+                "model_save": "模型 profile 已保存；密钥仅存本机钥匙串。",
+                "model_delete": "模型 profile 已删除。",
+                "model_activate": "已更新激活的模型提供者。",
+                "digest_save": "每日摘要设置已保存；开启后按设定时刻执行。",
+                "digest_once": "已开始生成一轮摘要，完成后在历史中查看。",
             }
             self.message_label.setText(
                 receipt.message
@@ -963,6 +1332,16 @@ class ResearchPage(QWidget):
             self._loaded and not running and not launching
         )
         self.save_button.setEnabled(self._loaded and not running and not self._pending)
+        model_ready = self._loaded and not running and not launching
+        busy_commands = {"model_save", "model_delete", "model_activate", "model_test"}
+        for button in (self.model_save_button, self.model_delete_button,
+                       self.model_activate_button, self.model_deactivate_button,
+                       self.model_test_button):
+            button.setEnabled(model_ready and not (self._pending & busy_commands))
+        self.digest_save_button.setEnabled(
+            self._loaded and not (self._pending & {"digest_save"}))
+        self.digest_run_button.setEnabled(
+            self._loaded and not running and not (self._pending & {"digest_once"}))
         self.settings_content.setEnabled(
             not running and not launching and "configure" not in self._pending
         )
@@ -1013,6 +1392,8 @@ class ResearchPage(QWidget):
             self._populate_settings(value["settings"])
         self._loaded = True
         self._populate_results()
+        self._populate_models()
+        self._populate_digest()
         self.run_detail.setHtml(self._runs_html())
         if self._active and self._runtime_state in {"RUNNING", "STOPPING"}:
             self._timer.start()
@@ -1315,6 +1696,9 @@ class ResearchPage(QWidget):
         if self._selected.get(str(kind)) != payload.get("id"):
             return
         item = payload["item"]
+        if kind == "digest":
+            self.digest_detail.setHtml(self._digest_html(item))
+            return
         if kind not in {"evidence", "report"}:
             return
         returned_offset = int(

@@ -138,12 +138,118 @@ def transcribe(
 
 @app.command("show")
 def show(kind: str, identity: str) -> None:
-    """离线读取 evidence 或 report 的完整内容。"""
+    """离线读取 evidence、report 或 digest 的完整内容。"""
     try:
         _print(_service().detail(kind, identity, full=True))
     except ValueError:
         typer.echo("找不到研究记录。", err=True)
         raise typer.Exit(2) from None
+
+
+@app.command("models")
+def models() -> None:
+    """列出模型 profile；不显示密钥，不联网。"""
+    _print({"profiles": _service().list_model_profiles()})
+
+
+@app.command("model-save")
+def model_save(
+    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    api_key: Annotated[str | None, typer.Option("--api-key", help="新API密钥；省略则保留已存密钥")] = None,
+) -> None:
+    """保存模型 profile JSON；密钥只进钥匙串，不会写入研究库。"""
+    try:
+        if path.stat().st_size > 64_000:
+            raise ValueError("profile too large")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        _print(_service().save_model_profile({"profile": payload, "api_key": api_key}))
+    except (ValueError, TypeError, OSError):
+        typer.echo("模型 profile 无效；请检查协议、端点、模型名和私网开关。", err=True)
+        raise typer.Exit(2) from None
+
+
+@app.command("model-activate")
+def model_activate(identity: Annotated[str | None, typer.Argument(help="profile id；留空取消激活")] = None) -> None:
+    """激活模型 profile；留空参数回退环境变量提供者。"""
+    try:
+        _print(_service().activate_model_profile(identity or None))
+    except ValueError:
+        typer.echo("找不到可用的模型 profile，或研究正在运行。", err=True)
+        raise typer.Exit(2) from None
+
+
+@app.command("model-delete")
+def model_delete(identity: str) -> None:
+    """删除模型 profile 并清理其密钥。"""
+    try:
+        _service().delete_model_profile(identity)
+        typer.echo(f"已删除 {identity}。")
+    except ValueError:
+        typer.echo("找不到模型 profile。", err=True)
+        raise typer.Exit(2) from None
+
+
+@app.command("model-test")
+def model_test(identity: str) -> None:
+    """对模型 profile 发起一次极小真实请求验证连通；会产生一次调用费用。"""
+    typer.echo("即将对该 profile 发起一次真实模型请求（可能产生费用）。", err=True)
+    _print(_service().test_model_profile(identity))
+
+
+@app.command("digest-status")
+def digest_status() -> None:
+    """读取每日摘要设置、计划与最近记录；不联网。"""
+    from .digest import digest_snapshot
+
+    value = digest_snapshot(_service().path)
+    value["runtime"]["scope"] = "cli_session; scheduler runs inside Guardian"
+    _print(value)
+
+
+@app.command("digest-configure")
+def digest_configure(path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) -> None:
+    """保存每日摘要设置JSON；开启后由 Guardian 按计划执行。"""
+    try:
+        if path.stat().st_size > 64_000:
+            raise ValueError("settings too large")
+        _print(_service().save_digest_settings(json.loads(path.read_text(encoding="utf-8"))))
+    except (ValueError, TypeError, OSError):
+        typer.echo("摘要设置无效；请检查时刻、主题和开关。", err=True)
+        raise typer.Exit(2) from None
+
+
+@app.command("digest-run")
+def digest_run() -> None:
+    """立即生成一轮摘要；不改变已设定的每日计划。"""
+    from .digest import submit_manual_digest
+
+    receipt = submit_manual_digest(_service().path)
+    _print(receipt)
+    if not receipt.get("accepted"):
+        raise typer.Exit(1)
+
+
+@app.command("digest-show")
+def digest_show(identity: str) -> None:
+    """离线读取一条摘要的完整内容。"""
+    try:
+        _print(_service().detail("digest", identity, full=True))
+    except ValueError:
+        typer.echo("找不到摘要记录。", err=True)
+        raise typer.Exit(2) from None
+
+
+@app.command("digest-history")
+def digest_history(offset: Annotated[int, typer.Option(min=0)] = 0,
+                   limit: Annotated[int, typer.Option(min=1, max=100)] = 20) -> None:
+    """分页读取摘要历史索引，不联网。"""
+    from .store import ResearchStore
+
+    with ResearchStore(_service().path) as store:
+        records = store.list_digests(limit=limit, offset=offset)
+    _print({"offset": offset, "items": [
+        {key: record.get(key) for key in ("id", "created_at", "trigger", "status", "detail", "counts")}
+        for record in records]})
 
 
 @app.command('replay')

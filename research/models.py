@@ -18,11 +18,71 @@ Completeness = Literal["full", "partial", "metadata"]
 ResearchAction = Literal["buy_candidate", "watch", "hold_review", "reduce_review", "insufficient_evidence"]
 ResearchStatus = Literal["ready", "waiting_content", "needs_configuration", "invalid_output", "failed", "insufficient_evidence", "expired"]
 Platform = Literal["youtube", "bilibili", "douyin", "xiaohongshu", "rss"]
+ModelProtocol = Literal["openai_compatible", "anthropic_compatible"]
 
 
 class ResearchModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True,
                               str_strip_whitespace=True, allow_inf_nan=False)
+
+
+class ModelProfile(ResearchModel):
+    """A user-owned model endpoint. The API key itself is never stored here."""
+
+    id: str = Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
+    name: str = Field(min_length=1, max_length=80)
+    protocol: ModelProtocol
+    base_url: str = Field(min_length=1, max_length=2048)
+    model: str = Field(min_length=1, max_length=160)
+    timeout_seconds: float = Field(ge=5, le=600, allow_inf_nan=False)
+    allow_private_network: bool = False
+    enabled: bool = True
+    key_configured: bool = False
+    key_updated_at: str | None = None
+    updated_at: str = Field(default="", max_length=64)
+
+
+class DigestTopic(ResearchModel):
+    label: str = Field(min_length=1, max_length=40)
+    keywords: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def coerce_keywords(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @field_validator("keywords")
+    @classmethod
+    def keywords_not_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not keyword or len(keyword) > 40 for keyword in value):
+            raise ValueError("keywords must be 1-40 characters")
+        return tuple(dict.fromkeys(value))
+
+
+class DigestSettings(ResearchModel):
+    """User-enabled daily digest plan; defaults stay fully off."""
+
+    enabled: bool = False
+    time_local: str = Field(default="08:00", pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
+    topics: tuple[DigestTopic, ...] = Field(default=(), max_length=20)
+    ai_summary: bool = False
+    notify: bool = False
+    max_items: int = Field(default=20, ge=1, le=100)
+    updated_at: str = Field(default="", max_length=64)
+
+    @field_validator("topics", mode="before")
+    @classmethod
+    def coerce_topics(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(dict(topic) if isinstance(topic, dict) else topic for topic in value)
+        return value
+
+    @model_validator(mode="after")
+    def unique_labels(self) -> DigestSettings:
+        labels = [topic.label.casefold() for topic in self.topics]
+        if len(labels) != len(set(labels)):
+            raise ValueError("duplicate digest topic label")
+        return self
 
 
 def aware(value: datetime) -> datetime:

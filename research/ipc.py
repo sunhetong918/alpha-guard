@@ -10,20 +10,22 @@ from .service import ResearchService
 
 def execute(service: ResearchService, params: Mapping[str, Any]) -> dict[str, Any]:
     command = params.get("command")
-    fields = {
-        "configure": {"settings"}, "subscribe": {"subscription"},
-        "subscription": {"id", "enabled"}, "delete": {"id"},
-        "import": {"material"}, "transcribe": {"path", "source_url", "title"},
-        "start": set(), "once": set(), "stop": set(),
-        "open_login": {"platform"},
+    # required fields plus optional fields per command; nothing else is accepted.
+    shapes: dict[str, tuple[set[str], set[str]]] = {
+        "configure": ({"settings"}, set()), "subscribe": ({"subscription"}, set()),
+        "subscription": ({"id", "enabled"}, set()), "delete": ({"id"}, set()),
+        "import": ({"material"}, set()), "transcribe": ({"path"}, {"source_url", "title"}),
+        "start": (set(), set()), "once": (set(), set()), "stop": (set(), set()),
+        "open_login": ({"platform"}, set()),
+        "model_save": ({"profile"}, {"api_key"}), "model_delete": ({"id"}, set()),
+        "model_activate": ({"id"}, set()), "model_test": ({"id"}, set()),
+        "digest_save": ({"settings"}, set()), "digest_once": (set(), set()),
     }
-    if not isinstance(command, str) or command not in fields:
+    if not isinstance(command, str) or command not in shapes:
         raise ValueError("unsupported research command")
+    required, optional = shapes[command]
     supplied = set(params) - {"command"}
-    if command == "transcribe":
-        if "path" not in supplied or supplied - fields[command]:
-            raise ValueError("invalid transcription fields")
-    elif supplied != fields[command]:
+    if not required <= supplied or supplied - (required | optional):
         raise ValueError("invalid research command fields")
     if command == "open_login":
         platform = params["platform"]
@@ -64,6 +66,38 @@ def execute(service: ResearchService, params: Mapping[str, Any]) -> dict[str, An
         if not all(isinstance(value, str) and len(value) <= 2048 for value in media.values()):
             raise ValueError("invalid transcription input")
         result = service.launch(media=media)
+    elif command == "model_save":
+        result = service.save_model_profile({"profile": params["profile"],
+                                             "api_key": params.get("api_key")})
+    elif command == "model_delete":
+        identity = params["id"]
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            raise ValueError("invalid model profile id")
+        service.delete_model_profile(identity)
+        result = {"id": identity, "deleted": True}
+    elif command == "model_activate":
+        identity = params["id"]
+        if identity is not None and (not isinstance(identity, str) or len(identity) > 64):
+            raise ValueError("invalid model profile id")
+        result = service.activate_model_profile(identity or None)
+    elif command == "model_test":
+        identity = params["id"]
+        if not isinstance(identity, str) or not identity or len(identity) > 64:
+            raise ValueError("invalid model profile id")
+        result = service.test_model_profile(identity)
+        outcome = result.get("status")
+        elapsed = result.get("elapsed_seconds")
+        message = ("模型连接测试成功（{:.1f} 秒）。".format(elapsed)
+                   if outcome == "success" and isinstance(elapsed, (int, float)) else
+                   "模型连接测试失败：{}。".format(result.get("detail") or "未知原因"))
+        return {"accepted": True, "command": command, "result": result, "message": message}
+    elif command == "digest_save":
+        value = params["settings"]
+        if not isinstance(value, dict):
+            raise ValueError("invalid digest settings")
+        result = service.save_digest_settings(value)
+    elif command == "digest_once":
+        result = service.run_digest_once()
     elif command == "stop":
         result = service.stop()
     else:

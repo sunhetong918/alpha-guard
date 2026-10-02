@@ -209,6 +209,15 @@ Cloud API 的 `2xx` 和 `wamid` 只证明 Meta 接受请求。手机侧的 `sent
 
 当前仓库包含发送端和 accepted 账本，不托管公网 webhook。若部署方需要端到端 delivered/read 证明，必须另行提供 HTTPS webhook，完成 Meta challenge、验证签名、限制请求体、按 `wamid` 幂等关联，并只把验证后的低基数状态交给 Guardian；不要把 webhook secret、原始手机号或完整 payload 写进普通日志。状态字段见 Meta 的[消息状态 webhook 文档](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/status)。
 
+## 研究页：模型与每日摘要
+
+研究页除原有标签外新增两页：
+
+- **模型**：保存自己的模型端点（OpenAI 兼容或 Anthropic 兼容协议、base URL、模型名、超时，可显式允许本机/私网端点）。API key 只存操作系统钥匙串，界面仅显示"已配置"状态；同一时刻最多激活一个 profile，不激活则沿用环境变量提供者。"测试连接"发起一次极小真实请求（有费用提示），不产生研究证据。
+- **每日摘要**：默认关闭的每日计划。显式开启并设定本地时刻后跨 Guardian 重启继续执行；关注清单为研究设置的"关注股票"加自定义主题关键词；可开启 AI 汇总（每轮最多一次模型调用，输出须过数字来源校验）与通知投递；"立即生成一次"不改计划。摘要历史离线可查，点击历史行可读取完整内容。
+
+两页均通过 Guardian 鉴权 IPC 操作；读取与刷新不触发任何网络请求。语义细节见 [RESEARCH.md](RESEARCH.md)。
+
 ## 排障顺序
 
 1. 运行 `uv run alpha-guard validate` 与 `uv run alpha-guard doctor`，确认配置可解析。

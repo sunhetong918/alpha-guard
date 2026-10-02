@@ -880,3 +880,82 @@ def test_selecting_existing_subscription_sets_login_platform_without_altering_dr
     assert page.message_label.text() == '未找到 Chrome，请安装后重试。'
     assert page._runtime_state == 'STOPPED'
     page.close()
+
+
+def _profile_row():
+    return {'id': 'a' * 32, 'name': '中转模型', 'protocol': 'openai_compatible',
+            'base_url': 'https://relay.example.com/v1', 'model': 'gpt-test',
+            'timeout_seconds': 30, 'allow_private_network': False, 'enabled': True,
+            'key_configured': True, 'key_updated_at': '2026-10-02T00:00:00+00:00',
+            'updated_at': '2026-10-02T00:00:00+00:00'}
+
+
+def test_models_tab_lists_profiles_and_saves_without_exposing_keys(qt_app):
+    client, page = _loaded_page(qt_app)
+    client.research_ready.emit(_snapshot(
+        model_profiles=[_profile_row()],
+        capabilities={'browser_enabled': False, 'model_provider': 'profile:中转模型',
+                      'model_configured': True, 'model_profile_active': _profile_row()}))
+    assert page.model_table.rowCount() == 1
+    assert '中转模型' in page.model_table.item(0, 0).text()
+    assert '当前激活' in page.model_table.item(0, 5).text()
+    page.model_table.selectRow(0)
+    assert page.model_name.text() == '中转模型'
+    assert page.model_key.text() == ''  # a saved key is never echoed back
+    page.model_key.setText('sk-new-abcdef123456')
+    page.model_save_button.click()
+    command, fields = client.commands[-1]
+    assert command == 'model_save'
+    assert fields['api_key'] == 'sk-new-abcdef123456'
+    assert fields['profile']['id'] == 'a' * 32
+    client.action_completed.emit(ActionReceipt('research-model_save', True, 'Guardian 已接受请求', 'm0'))
+    page.model_activate_button.click()
+    assert client.commands[-1] == ('model_activate', {'id': 'a' * 32})
+    client.action_completed.emit(ActionReceipt('research-model_activate', True, 'Guardian 已接受请求', 'm2'))
+    page.model_deactivate_button.click()
+    assert client.commands[-1] == ('model_activate', {'id': ''})
+    client.action_completed.emit(ActionReceipt('research-model_save', True, 'Guardian 已接受请求', 'm1'))
+    assert '钥匙串' in page.message_label.text()
+    page.close()
+
+
+def test_digest_tab_populates_saves_settings_and_runs_once(qt_app):
+    client, page = _loaded_page(qt_app)
+    digest = {
+        'settings': {'enabled': True, 'time_local': '09:30',
+                     'topics': [{'label': '半导体', 'keywords': ['芯片', '光刻']}],
+                     'ai_summary': False, 'notify': False, 'max_items': 12},
+        'plan': {'enabled': True, 'next_run_at': '2026-10-03T01:30:00+00:00'},
+        'runtime': {'state': 'RUNNING', 'next_run_at': '2026-10-03T01:30:00+00:00'},
+        'latest': {'id': 'd1', 'created_at': '2026-10-02T01:30:00+00:00', 'status': 'completed',
+                   'detail': '', 'trigger': 'schedule', 'counts': {'matched': 2, 'evidence_window': 5},
+                   'sections': [{'key': 'topic:半导体', 'kind': 'topic', 'label': '半导体',
+                                 'match': '芯片', 'entries': [
+                                     {'evidence_id': 'e1', 'title': '芯片涨价', 'score': 3,
+                                      'source_url': 'https://e.example.com/1', 'platform': 'news',
+                                      'published_at': None, 'matched': ['topic:半导体']}]}],
+                   'coverage_gaps': [], 'ai_summary': {'enabled': False, 'status': 'disabled'},
+                   'delivery': {'enabled': False, 'status': 'skipped'}},
+        'history': [{'id': 'd0', 'created_at': '2026-10-01T01:30:00+00:00', 'status': 'completed',
+                     'detail': '', 'trigger': 'schedule', 'counts': {}, 'coverage_gaps': []}],
+    }
+    client.research_ready.emit(_snapshot(digest=digest))
+    assert page.digest_enabled.isChecked() and page.digest_time.time().toString("HH:mm") == '09:30'
+    assert page.digest_topics.toPlainText().startswith('半导体: 芯片')
+    assert page.digest_history.rowCount() == 1
+    assert '芯片涨价' in page.digest_detail.toPlainText()
+    page.digest_topics.setPlainText('创新药: 临床, FDA')
+    page.digest_ai.setChecked(True)
+    page._save_digest_settings()
+    command, fields = client.commands[-1]
+    assert command == 'digest_save'
+    assert fields['settings']['topics'] == [{'label': '创新药', 'keywords': ['临床', 'FDA']}]
+    assert fields['settings']['ai_summary'] is True
+    page.digest_run_button.click()
+    assert client.commands[-1][0] == 'digest_once'
+    client.action_completed.emit(ActionReceipt('research-digest_save', True, 'Guardian 已接受请求', 'd1'))
+    assert not page._digest_dirty
+    page.digest_history.selectRow(0)
+    assert client.details[-1] == ('digest', 'd0')
+    page.set_detail({'kind': 'digest', 'id': 'd0', 'item': digest['history'][0]})
+    page.close()
