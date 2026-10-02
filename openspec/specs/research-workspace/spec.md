@@ -1,7 +1,7 @@
 # research-workspace Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+桌面研究页、Guardian 鉴权 IPC 与 CLI 提供同一研究域的可操作入口：监控开关、订阅管理、证据与报告的离线查看、异步任务与真实状态展示；界面刷新只读取已保存结果，不触发联网分析，等待与失败状态可直接辨识。
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # news-evidence Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+新闻与作者材料以有状态方式采集：保留原始正文/字幕/时间片段证据、内容完整度分级、内容版本与修订屏障、增量去重与分析缓存。来源失败如实呈现为失败，不冒充“无新闻”；采集失败的健康状态与通知去重顺序必须正确。
 
 ## Requirements
 

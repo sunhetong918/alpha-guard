@@ -1,7 +1,7 @@
 # creator-subscriptions Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+统一管理 YouTube、B站、抖音、小红书及 RSS/Atom 作者订阅：区分更新发现与全文获取，逐平台如实呈现能力状态（成功/部分/失败/需配置/需授权/不支持），受限平台在取得授权前不得虚假宣称可用；支持已获准音视频的本地转写与失败恢复。
 
 ## Requirements
 

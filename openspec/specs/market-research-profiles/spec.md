@@ -1,7 +1,7 @@
 # market-research-profiles Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+为美股、港股、A股提供研究市场档案：证券身份包含交易所且不跨市场合并，行情数据保留提供者时间与质量标记；A股先接入明确标注交易日的日线研究，数据时效或交易约束不合格时短线建议明确不可用。
 
 ## Requirements
 

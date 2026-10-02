@@ -1,7 +1,7 @@
 # on-demand-monitoring Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+研究信息采集默认关闭，只能由用户显式启动：提供单次扫描、开始/停止跟踪与频率选择，停止或后台进程重启后不自行恢复，并对每轮采集设定成本与并发边界。旧的四小时隐式新闻任务不再自动注册，股票规则巡检的只读行为不因此扩大。
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # multi-horizon-research Specification
 
 ## Purpose
-TBD - created by archiving change add-on-demand-investment-research. Update Purpose after archive.
+基于已保存证据生成短线、波段、中长期可多选的研究报告：区分事实、观点与模型推断，逐条引用必须匹配原文；建议带条件、有效期与失效条件，材料不完整、行情过期或引用不合法时拒绝方向性结论。模型不能执行交易或覆盖确定性规则。
 
 ## Requirements
 
