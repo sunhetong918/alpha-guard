@@ -152,7 +152,7 @@ def test_fixture_window_loads_overview_and_navigates_all_pages(
     window.show()
 
     assert _wait_until(qt_app, lambda: window.snapshot is not None)
-    assert window.stack.count() == 5
+    assert window.stack.count() == 6
     assert "局部退化" in window.overall_badge.text()
     assert window.overview_page.receipt_id.text().endswith("CPT-20260812-112600")
     for index, key in enumerate(
@@ -196,6 +196,9 @@ class _FakeGuardianClient(GuardianClient):
 
     def refresh(self) -> None:
         self.refresh_count += 1
+
+    def refresh_research(self) -> None:
+        self.research_ready.emit(FixtureGuardianClient()._research_payload)
 
     def request_scan(self) -> None:
         pass

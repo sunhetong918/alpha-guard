@@ -61,6 +61,7 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "typer" },
+    { name = "websockets" },
     { name = "yfinance" },
 ]
 
@@ -129,6 +130,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31.0" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "typer", specifier = ">=0.15.0" },
+    { name = "websockets", specifier = ">=14,<18" },
     { name = "yfinance", specifier = ">=0.2.40" },
 ]
 provides-extras = ["ai", "cn-data", "futu", "notifications", "desktop", "desktop-build", "all"]

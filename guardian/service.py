@@ -114,6 +114,9 @@ def main() -> int:
         assert server is not None
         assert runtime is not None
         server.stop()
+        backend.close_research()
+        from research.browser_source import disconnect_browser
+        disconnect_browser()
         runtime.stop()
     if restart_requested:
         return 75

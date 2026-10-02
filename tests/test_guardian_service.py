@@ -78,7 +78,7 @@ def _patch_startup_dependencies(
 
     monkeypatch.setattr(service, "GuardianTokenStore", TokenStore)
     monkeypatch.setattr(service, "GuardianSupervisor", Runtime)
-    monkeypatch.setattr(service, "AlphaGuardBackend", lambda **_kwargs: object())
+    monkeypatch.setattr(service, "AlphaGuardBackend", lambda **_kwargs: SimpleNamespace(close_research=lambda: events.append("research.stop")))
     monkeypatch.setattr(
         service,
         "GuardianApplication",
@@ -118,5 +118,6 @@ def test_guardian_normal_start_orders_endpoint_before_runtime(
         "server.start",
         "runtime.start",
         "server.stop",
+        "research.stop",
         "runtime.stop",
     ]

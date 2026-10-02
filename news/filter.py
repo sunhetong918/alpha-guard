@@ -139,7 +139,11 @@ def ai_score_article(
         if client is None:
             import anthropic
 
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(
+                api_key=api_key,
+                timeout=runtime.http_timeout_seconds,
+                max_retries=0,
+            )
         response = client.messages.create(
             model=runtime.anthropic_model,
             max_tokens=240,
@@ -183,6 +187,7 @@ def filter_news(
     ai_filter: AIFilterConfig | Mapping[str, Any] | None = None,
     settings: Settings | None = None,
     scorer: ScoreFunction | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Filter articles with deterministic, explicit AI degradation.
 
@@ -240,6 +245,8 @@ def filter_news(
     ai_calls = 0
 
     for article in matched:
+        if should_continue is not None and not should_continue():
+            break
         if ai_calls >= max_ai_calls:
             alerts.append(
                 _annotate_degraded(
@@ -250,14 +257,23 @@ def filter_news(
             )
             continue
 
-        result = score_article(
-            article,
-            article["related_tickers"],
-            article["related_topics"],
-            watchlist_names,
-            settings=runtime,
-        )
         ai_calls += 1
+        try:
+            result = score_article(
+                article,
+                article["related_tickers"],
+                article["related_topics"],
+                watchlist_names,
+                settings=runtime,
+            )
+        except Exception as exc:  # noqa: BLE001 - injected scorer is a boundary
+            logger.error("AI news scorer failed (%s)", type(exc).__name__)
+            result = _degraded_ai_result("error", "AI 筛选请求失败；仅完成关键词匹配。")
+
+        if not isinstance(result, Mapping):
+            result = _degraded_ai_result(
+                "invalid_output", "AI 筛选返回无效结构；仅完成关键词匹配。"
+            )
 
         if result.get("score") is None:
             alerts.append(

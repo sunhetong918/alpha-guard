@@ -1633,11 +1633,11 @@ def _validated_run_record(
         status = row["status"]
         if type(run_id) is not int or run_id <= 0:
             raise ValueError("run id is invalid")
-        if not isinstance(status, str) or status not in {
+        if not isinstance(status, str) or (status not in {
             "success",
             "partial",
             "error",
-        }:
+        } and not (job == "news-scan" and status == "disabled")):
             raise ValueError("run status is invalid")
         if not isinstance(row["started_at"], str) or not isinstance(
             row["finished_at"], str

@@ -39,6 +39,9 @@ _METHOD_TO_HANDLER = {
     "config.validate": "config_validate",
     "config.apply": "config_apply",
     "scan.trigger": "scan_trigger",
+    "research.get": "research_get",
+    "research.command": "research_command",
+    "research.detail": "research_detail",
     "delivery.test": "delivery_test",
     "guardian.stop": "guardian_stop",
     "guardian.restart": "guardian_restart",
@@ -109,6 +112,15 @@ class GuardianBackend:
     ) -> JsonValue:
         del params, context
         raise GuardianDispatchError.not_implemented("health.get")
+
+    def research_get(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        raise GuardianDispatchError.not_implemented("research.get")
+
+    def research_command(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        raise GuardianDispatchError.not_implemented("research.command")
+
+    def research_detail(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        raise GuardianDispatchError.not_implemented("research.detail")
 
     def cockpit_get(
         self, params: dict[str, JsonValue], context: RequestContext

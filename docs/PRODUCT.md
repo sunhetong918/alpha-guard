@@ -1,6 +1,6 @@
 # Alpha Guard 产品定位：可信沉默（Trusted Silence）
 
-状态：产品与可靠性决策基线｜更新：2026-08-10
+状态：产品与可靠性决策基线｜更新：2026-09-30
 
 ## Press Release
 
@@ -15,11 +15,13 @@ Alpha Guard 是面向港股和美股个人投资者的自托管、只读、证�
 - Signal Plane 检查用户预先写下的规则，输出三态规则证据与五态人工核验决策；
 - Silence Plane 检查扫描责任、数据新鲜度、provider 能力、送达和状态完整性，回答系统是否有资格保持安静。
 
-Alpha Guard 不荐股，不预测短期涨跌，也不允许 AI 修改硬规则。可选的 Futu OpenAPI 集成只读取本机 OpenD 行情，不接收券商凭据、不解锁交易、不提交订单。`BUY_REVIEW` 和 `SELL_REVIEW` 只是人工核验类别。数据、新闻、AI 结果、颜色和提醒均不构成投资建议。
+Alpha Guard 增加按需投资研究：新闻和访谈材料可生成带原文引用、反证与有效期的多周期研究候选，支持 US/HK/CN 市场选择。A 股当前限日线研究；研究不会自动开启，不允许 AI 修改硬规则。可选的 Futu OpenAPI 集成只读取本机 OpenD 行情，不接收券商凭据、不解锁交易、不提交订单。`BUY_REVIEW` 和 `SELL_REVIEW` 只是人工核验类别。数据、新闻、AI 结果、颜色和提醒均不构成投资建议。
 
 ## 当前产品与未来产品
 
 当前产品是本地优先的桌面系统：PySide 桌面 App 展示 Cockpit，后台 Guardian 在窗口关闭后继续调度并独占 SQLite/网络，Telegram 与 WhatsApp 是独立移动提醒，外部 dead-man heartbeat 可选。Typer CLI 继续提供配置校验、诊断、离线演练、Cockpit JSON 和显式修复。新克隆仓库默认离线、不联网、不通知，标的、新闻源、AI、Telegram、WhatsApp 和 heartbeat 都必须显式启用。
+
+研究工作台的来源能力、开启方式和验收边界见[按需投资研究](RESEARCH.md)。
 
 未来可以增加可选的只读 Cockpit Web，消费与桌面相同的四类收据。浏览器 UI 还没有实现；它不会成为远程交易面，也不能绕过 `UNKNOWN`、`AMBER` 或 `RED`。
 
@@ -71,7 +73,7 @@ Silence Plane 采用 30 天 99% full-scan SLO：`error_rate = violations / expec
 
 ### 它是荐股软件或自动交易机器人吗？
 
-不是。Alpha Guard 只评估用户自己预先写下的规则，输出人工核验提醒。项目不保存券商凭据、不提供订单接口、不执行任何交易；所有输出均非投资建议。
+Alpha Guard 支持预设规则复核，以及基于新闻和博主材料的条件式研究建议。用户选择周期并主动开始扫描，所有报告保留引用和不足项。项目不保存券商凭据、不提供订单接口、不执行任何交易；所有输出均非投资建议。
 
 ### `GREEN` 是否表示可以放心持有？
 

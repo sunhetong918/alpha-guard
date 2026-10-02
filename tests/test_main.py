@@ -36,6 +36,13 @@ from notifier.heartbeat import (
 )
 from notifier.whatsapp import WhatsAppDeliveryResult
 from data.futu_provider import FutuQuote
+from news.sources import NewsFetchReport, ProviderFetchResult
+
+
+def _news_fetch_report(articles):
+    return NewsFetchReport(
+        articles, (ProviderFetchResult("fixture", "news", "success", articles),)
+    )
 
 
 runner = CliRunner()
@@ -3119,7 +3126,7 @@ def test_disabled_instrument_keywords_cannot_generate_news_notifications(
 
     monkeypatch.setattr(main, "get_settings", _ready_settings)
     monkeypatch.setattr(
-        main, "fetch_all_news", lambda *_args, **_kwargs: [dict(article)]
+        main, "fetch_all_news_report", lambda *_args, **_kwargs: _news_fetch_report([dict(article)])
     )
     monkeypatch.setattr(main, "send_news_alert", capture)
     monkeypatch.setattr(main, "STATE_PATH", tmp_path / "state.db")
@@ -3152,7 +3159,7 @@ def test_news_ai_configuration_is_forwarded_without_losing_enabled_or_limits(
         return []
 
     monkeypatch.setattr(main, "load_news_config", lambda: configured)
-    monkeypatch.setattr(main, "fetch_all_news", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "fetch_all_news_report", lambda *_args, **_kwargs: _news_fetch_report([]))
     monkeypatch.setattr(main, "filter_news", capture_filter)
 
     outcome = asyncio.run(main.run_news_scan(notify=False, record_run=False))
@@ -4120,7 +4127,7 @@ def test_news_delivery_failure_is_sticky_and_no_attempt_preserves_it(
 
     monkeypatch.setattr(main, "load_rules_config", lambda: rules)
     monkeypatch.setattr(main, "get_settings", lambda: settings)
-    monkeypatch.setattr(main, "fetch_all_news", lambda *_args, **_kwargs: [article])
+    monkeypatch.setattr(main, "fetch_all_news_report", lambda *_args, **_kwargs: _news_fetch_report([article]))
     monkeypatch.setattr(main, "filter_news", lambda *_args, **_kwargs: [article])
     monkeypatch.setattr(main, "send_news_alert", fail_news)
     monkeypatch.setattr(main, "STATE_PATH", state_path)
@@ -6298,3 +6305,35 @@ def test_corrupt_watchdog_ledger_fails_silence_closed_but_signal_continues(
     assert outcome["protection"]["reason_codes"] == ["state_corrupt"]
     assert any(item["component"] == "watchdog_incidents" for item in integrity)
     assert secret not in str(outcome)
+
+
+def test_news_provider_failure_is_not_a_successful_empty_scan(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, 'STATE_PATH', tmp_path / 'state.db')
+    failed = NewsFetchReport([], (ProviderFetchResult('newsapi', 'search', 'failed', [], 'timeout'),))
+    monkeypatch.setattr(main, 'fetch_all_news_report', lambda *a, **kw: failed)
+    outcome = asyncio.run(main.run_news_scan(notify=False, record_run=True))
+    assert outcome['status'] == 'error'
+    assert outcome['collection']['failed'] == 1
+    with StateStore(main.STATE_PATH) as store:
+        assert store.run_records(job='news-scan', limit=1)[0]['status'] == 'error'
+
+
+def test_news_already_notified_first_five_do_not_starve_sixth(monkeypatch, tmp_path):
+    articles = [{'title': f'Apple report {i}', 'summary': 'test', 'source': 'test',
+                 'url': f'https://example.test/{i}', 'datetime': '2026-09-30T00:00:00+00:00'} for i in range(6)]
+    sent = []
+    async def send(article, settings=None):
+        sent.append(article['url'])
+    monkeypatch.setattr(main, 'get_settings', _ready_settings)
+    monkeypatch.setattr(main, 'STATE_PATH', tmp_path / 'state.db')
+    monkeypatch.setattr(main, 'fetch_all_news_report', lambda *a, **kw: _news_fetch_report(articles))
+    monkeypatch.setattr(main, 'filter_news', lambda *a, **kw: articles)
+    monkeypatch.setattr(main, 'send_news_alert', send)
+    with StateStore(main.STATE_PATH) as store:
+        for article in articles[:5]:
+            fingerprint = main._news_fingerprint(article)
+            token = store.claim_news_notification(fingerprint)
+            store.mark_news_notified(fingerprint, claim_token=token)
+    outcome = asyncio.run(main.run_news_scan(notify=True, record_run=False))
+    assert outcome['notified'] == 1
+    assert sent == [articles[5]['url']]

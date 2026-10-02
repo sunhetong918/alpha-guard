@@ -1,0 +1,18 @@
+{
+  "markets": ["US", "HK", "CN"],
+  "horizons": ["short", "swing", "long"],
+  "instruments": [
+    {"market": "US", "ticker": "AAPL", "name": "Apple"},
+    {"market": "HK", "ticker": "00700", "name": "腾讯控股"},
+    {"market": "CN", "ticker": "600519", "name": "贵州茅台"}
+  ],
+  "interval_minutes": 15,
+  "news_enabled": false,
+  "news_sources": [],
+  "ai_enabled": false,
+  "max_items": 20,
+  "max_ai_calls": 10,
+  "media_enabled": false,
+  "max_media_items": 2,
+  "max_media_seconds": 600
+}

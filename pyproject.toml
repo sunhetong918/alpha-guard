@@ -15,6 +15,7 @@ dependencies = [
     "requests>=2.31.0",
     "rich>=13.9.0",
     "typer>=0.15.0",
+    "websockets>=14,<18",
     "yfinance>=0.2.40",
 ]
 
@@ -77,6 +78,7 @@ include = [
     "news*",
     "notifier*",
     "reliability*",
+    "research*",
     "signals*",
     "state*",
     "trading*",
@@ -107,6 +109,7 @@ source = [
     "news",
     "notifier",
     "reliability",
+    "research",
     "scheduler",
     "signals",
     "state",

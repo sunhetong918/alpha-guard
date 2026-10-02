@@ -449,11 +449,17 @@ def build_scheduler(
     trust_watchdog: NoArgumentCallback | None = None,
     watchdog_interval_minutes: int = DEFAULT_WATCHDOG_INTERVAL_MINUTES,
     event_listener: SchedulerEventCallback | None = None,
+    news_interval_minutes: int | None = None,
 ) -> AsyncIOScheduler:
     """Configure (but do not start) the Alpha Guard APScheduler instance."""
 
     if watchdog_interval_minutes < 1:
         raise ValueError("watchdog_interval_minutes must be positive")
+    if news_interval_minutes is not None and (
+        type(news_interval_minutes) is not int
+        or not 1 <= news_interval_minutes <= 1440
+    ):
+        raise ValueError("news_interval_minutes must be between 1 and 1440")
 
     configured = scheduler or AsyncIOScheduler(
         timezone=NEWS_TIMEZONE,
@@ -489,19 +495,20 @@ def build_scheduler(
                 **_JOB_OPTIONS,
             )
 
-    configured.add_job(
-        run_news_scan,
-        CronTrigger(
-            hour=",".join(str(hour) for hour in NEWS_HOURS),
-            minute=0,
-            timezone=NEWS_TIMEZONE,
-        ),
-        args=(scan_news,),
-        id="news-scan",
-        name="Fixed-hour news scan",
-        replace_existing=True,
-        **_JOB_OPTIONS,
-    )
+    # News monitoring is opt-in for this process/session. Merely enabling a
+    # provider or starting the Guardian never grants permission to poll it.
+    if news_interval_minutes is not None:
+        configured.add_job(
+            run_news_scan,
+            IntervalTrigger(minutes=news_interval_minutes, timezone=NEWS_TIMEZONE),
+            args=(scan_news,),
+            id="news-scan",
+            name="User-started news scan",
+            replace_existing=True,
+            **_JOB_OPTIONS,
+        )
+    elif configured.get_job("news-scan") is not None:
+        configured.remove_job("news-scan")
     if trust_watchdog is not None:
         configured.add_job(
             run_news_scan,

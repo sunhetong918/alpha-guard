@@ -38,8 +38,9 @@ from config import (
 )
 from data.fetcher import get_stock
 from data.futu_provider import FutuQuote
+from research.cli import app as research_app
 from news.filter import filter_news
-from news.sources import fetch_all_news
+from news.sources import fetch_all_news_report
 from notifier.telegram_bot import (
     render_incident_alert,
     render_signal_alert,
@@ -76,7 +77,6 @@ from scheduler import (
     latest_expected_market_scan,
     market_freshness_context,
     next_market_run,
-    next_news_run,
 )
 from signals.engine import EvaluationDecision, RuleStatus, evaluate
 from state import (
@@ -3022,13 +3022,14 @@ async def run_news_scan(
     macro_queries = [
         keyword for topic in news_config.macro_topics for keyword in topic.keywords[:2]
     ]
-    articles = await asyncio.to_thread(
-        fetch_all_news,
+    fetch_report = await asyncio.to_thread(
+        fetch_all_news_report,
         enabled.keys(),
         macro_queries,
         news_config.sources,
         settings=settings,
     )
+    articles = fetch_report.articles
     alerts = await asyncio.to_thread(
         filter_news,
         articles,
@@ -3064,11 +3065,13 @@ async def run_news_scan(
                 now=delivery_started_at,
             )
         if notify and store is not None:
-            for article in alerts[:5]:
+            attempted = 0
+            for article in alerts:
                 fingerprint = _news_fingerprint(article)
                 claim = store.claim_news_notification(fingerprint)
                 if claim is None:
                     continue
+                attempted += 1
                 try:
                     delivered_at = datetime.now(UTC)
                     async def send_telegram_news() -> None:
@@ -3100,6 +3103,8 @@ async def run_news_scan(
                             "释放新闻通知 claim 失败；将等待 lease 自动过期"
                         )
                     notification_errors.append(_error_code(exc))
+                if attempted >= 5:
+                    break
 
         delivery_finished_at = datetime.now(UTC)
         if notify and store is not None:
@@ -3109,7 +3114,11 @@ async def run_news_scan(
                 started_at=started_at,
                 completed_at=delivery_finished_at,
             )
-        status = "partial" if notification_errors else "success"
+        status = (
+            "error" if fetch_report.status == "failed" else
+            "partial" if notification_errors or fetch_report.status == "partial" else
+            "disabled" if fetch_report.status == "disabled" else "success"
+        )
         outcome = {
             "status": status,
             "fetched": len(articles),
@@ -3117,6 +3126,7 @@ async def run_news_scan(
             "notified": notified,
             "notification_errors": notification_errors,
             "alerts": alerts,
+            "collection": fetch_report.to_summary(),
         }
         if record_run and store is not None:
             store.record_run(
@@ -3340,7 +3350,7 @@ def doctor(
         )
         table.add_row("下次美股扫描", next_market_run("US", now).isoformat())
         table.add_row("下次港股扫描", next_market_run("HK", now).isoformat())
-        table.add_row("下次新闻扫描", next_news_run(now).isoformat())
+        table.add_row("新闻自动跟踪", "默认关闭；请在研究页主动开始，或显式运行 news")
         console.print(table)
         console.print("[green]本地健康检查完成；未执行联网探测。[/green]")
     except Exception as exc:  # noqa: BLE001 - CLI boundary
@@ -4482,6 +4492,9 @@ def run(
         console.print("调度器已停止。")
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         _handle_failure(exc)
+
+
+app.add_typer(research_app, name="research")
 
 
 if __name__ == "__main__":

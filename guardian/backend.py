@@ -8,7 +8,10 @@ import os
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
+
+if TYPE_CHECKING:
+    from research.service import ResearchService
 
 from pydantic import JsonValue
 
@@ -155,6 +158,49 @@ class AlphaGuardBackend(GuardianBackend):
         self._preferences_store = preferences_store or PreferencesStore()
         self._autostart_apply = autostart_apply
         self._started_at = clock().astimezone(UTC)
+        self._research: ResearchService | None = None
+
+    def _research_service(self) -> ResearchService:
+        if self._research is None:
+            from research.service import ResearchService
+
+            self._research = ResearchService(STATE_PATH)
+        return self._research
+
+    def research_get(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        del context
+        page = params.get("page", 0)
+        if set(params) - {"page"} or type(page) is not int or page < 0:
+            _invalid_params()
+        return cast(JsonValue, self._research_service().snapshot(page=page))
+
+    def research_detail(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        del context
+        if not {"kind", "id"}.issubset(params) or set(params) - {"kind", "id", "offset", "segment_offset"} or not isinstance(params["id"], str) or not isinstance(params["kind"], str):
+            _invalid_params()
+        offset, segment_offset = params.get("offset", 0), params.get("segment_offset", 0)
+        if type(offset) is not int or type(segment_offset) is not int:
+            _invalid_params()
+        try:
+            return cast(JsonValue, self._research_service().detail(params["kind"], params["id"], offset=offset, segment_offset=segment_offset))
+        except ValueError:
+            _invalid_params()
+
+    def research_command(self, params: dict[str, JsonValue], context: RequestContext) -> JsonValue:
+        from research.ipc import execute
+
+        del context
+        try:
+            return cast(JsonValue, execute(self._research_service(), params))
+        except (ValueError, TypeError):
+            raise GuardianDispatchError(
+                code=RpcErrorCode.INVALID_PARAMS, kind="invalid_params",
+                message="研究设置无效或任务正在运行，请先停止后再修改",
+            ) from None
+
+    def close_research(self) -> None:
+        if self._research is not None:
+            self._research.close()
 
     def _now(self) -> datetime:
         value = self._clock()

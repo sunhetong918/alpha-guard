@@ -464,10 +464,35 @@ class Settings(BaseSettings):
         default=None, validation_alias="ANTHROPIC_API_KEY"
     )
     anthropic_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="claude-sonnet-4-6",
         validation_alias="ANTHROPIC_MODEL",
         min_length=1,
         max_length=160,
+    )
+    research_model_provider: Literal["anthropic", "claude_cli", "codex_cli"] = Field(
+        default="anthropic", validation_alias="RESEARCH_MODEL_PROVIDER"
+    )
+    research_model_timeout_seconds: float = Field(
+        default=180, validation_alias="RESEARCH_MODEL_TIMEOUT_SECONDS",
+        ge=5, le=600, allow_inf_nan=False,
+    )
+    research_claude_executable: str | None = Field(
+        default=None, validation_alias="RESEARCH_CLAUDE_EXECUTABLE", max_length=4096,
+    )
+    research_codex_executable: str | None = Field(
+        default=None, validation_alias="RESEARCH_CODEX_EXECUTABLE", max_length=4096,
+    )
+    research_codex_model: str = Field(
+        default="gpt-5.5", validation_alias="RESEARCH_CODEX_MODEL", min_length=1, max_length=160,
+    )
+    research_browser_enabled: bool = Field(
+        default=False, validation_alias="ALPHA_GUARD_BROWSER_ENABLED",
+    )
+    research_browser_mode: Literal["dedicated", "existing"] = Field(
+        default="dedicated", validation_alias="ALPHA_GUARD_BROWSER_MODE",
+    )
+    transcription_command: str | None = Field(
+        default=None, validation_alias="ALPHA_GUARD_TRANSCRIPTION_COMMAND", max_length=24000,
     )
     http_timeout_seconds: float = Field(
         default=10.0,

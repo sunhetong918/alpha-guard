@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -27,6 +28,7 @@ from .pages import (
     ProvidersPage,
     SettingsPage,
 )
+from .research_page import ResearchPage
 from .widgets import StatusBadge
 
 
@@ -36,6 +38,7 @@ NAV_ITEMS = (
     ("incidents", "!", "事故记录"),
     ("providers", "≋", "外部能力"),
     ("settings", "⚙", "设置与通道"),
+    ("research", "⌕", "投资研究"),
 )
 
 
@@ -82,8 +85,10 @@ class Sidebar(QFrame):
             button.setProperty("pageKey", key)
             button.setAccessibleName(title)
             button.setToolTip(title)
-            button.clicked.connect(
-                lambda checked=False, current=key: self.page_requested.emit(current)
+            button.toggled.connect(
+                lambda checked, current=key: (
+                    self.page_requested.emit(current) if checked else None
+                )
             )
             self.buttons.addButton(button, index)
             self.nav_buttons[key] = button
@@ -130,6 +135,21 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.client = client
         self.snapshot: DashboardSnapshot | None = None
+        self._research_state: str | None = None
+        self._close_state_unverified = False
+        self._close_allowed = False
+        self._close_wait: str | None = None
+        self._close_stop_accepted = False
+        self._client_busy = False
+        self._close_fresh_read_started = False
+        self._close_read_pending = False
+        self._close_dialog: QMessageBox | None = None
+        self._close_timer = QTimer(self)
+        self._close_timer.setSingleShot(True)
+        self._close_timer.timeout.connect(self._close_confirmation_timeout)
+        self._close_poll = QTimer(self)
+        self._close_poll.setInterval(1000)
+        self._close_poll.timeout.connect(self._poll_close_confirmation)
         self._page_keys = [item[0] for item in NAV_ITEMS]
         self.setObjectName("alphaGuardMainWindow")
         self.setWindowTitle("Alpha Guard · 可信沉默值班台")
@@ -157,12 +177,14 @@ class MainWindow(QMainWindow):
         self.incidents_page = IncidentsPage()
         self.providers_page = ProvidersPage()
         self.settings_page = SettingsPage()
+        self.research_page = ResearchPage(self.client)
         self.pages = (
             self.overview_page,
             self.assets_page,
             self.incidents_page,
             self.providers_page,
             self.settings_page,
+            self.research_page,
         )
         for page in self.pages:
             self.stack.addWidget(page)
@@ -186,6 +208,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Meta+3"), self, lambda: self.show_page("incidents"))
         if auto_refresh:
             QTimer.singleShot(0, self.client.refresh)
+            QTimer.singleShot(0, self.client.refresh_research)
 
     def _build_topbar(self) -> QFrame:
         bar = QFrame()
@@ -250,6 +273,9 @@ class MainWindow(QMainWindow):
         self.client.action_completed.connect(self._show_action)
         self.client.configuration_saved.connect(self._show_configuration_saved)
         self.client.connection_state_changed.connect(self._connection_changed)
+        self.client.research_ready.connect(self._research_state_received)
+        self.client.action_completed.connect(self._research_close_action)
+        self.client.request_failed.connect(self._research_close_failed)
 
     def show_page(self, key: str) -> None:
         try:
@@ -257,8 +283,15 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self.stack.setCurrentIndex(index)
+        self.scan_button.setVisible(key != "research")
         button = self.sidebar.nav_buttons[key]
+        button.blockSignals(True)
         button.setChecked(True)
+        button.blockSignals(False)
+        if key == "research":
+            self.research_page.activate()
+        else:
+            self.research_page.deactivate()
 
     def set_snapshot(self, snapshot: DashboardSnapshot) -> None:
         self.snapshot = snapshot
@@ -307,11 +340,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("正在由 Guardian 保存公开偏好…")
 
     def _set_busy(self, busy: bool) -> None:
+        self._client_busy = busy
         self.refresh_button.setEnabled(not busy)
         self.scan_button.setEnabled(not busy)
         self.settings_page.set_busy(busy)
         if busy:
             self.connection_label.setText("Guardian 正在处理请求…")
+        elif self._close_stop_accepted and not self._close_fresh_read_started:
+            self._poll_close_confirmation()
 
     def _connection_changed(self, state: str) -> None:
         labels = {
@@ -338,7 +374,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{state} · {receipt.message} · {receipt.request_id}", 8_000
         )
-        QTimer.singleShot(250, self.client.refresh)
+        if not receipt.action.startswith("research-"):
+            QTimer.singleShot(250, self.client.refresh)
 
     def _show_configuration_saved(self, _payload: object) -> None:
         self.statusBar().showMessage("公开偏好已由 Guardian 保存", 6_000)
@@ -358,5 +395,148 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self._close_allowed:
+            if self._close_wait is not None or self._close_dialog is not None:
+                event.ignore()
+                return
+            if self.research_page.close_requires_confirmation or self._research_state in {"RUNNING", "STOPPING"}:
+                event.ignore()
+                self._show_research_close_dialog()
+                return
+            if self._research_state is None:
+                event.ignore()
+                if self._close_state_unverified:
+                    self._show_unknown_research_close_dialog()
+                    return
+                self._close_wait = "inspect"
+                self._close_timer.start(10_000)
+                self.statusBar().showMessage("正在读取研究状态，确认是否仍在后台运行…")
+                self.client.refresh_research()
+                return
+        self._close_timer.stop()
+        self._close_poll.stop()
+        self.research_page.deactivate()
         self.client.close()
         super().closeEvent(event)
+
+    def _show_research_close_dialog(self) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("关闭窗口前确认研究跟踪")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText("研究仍在运行或正在启动。关闭窗口后，Guardian 会继续在后台处理。")
+        dialog.setInformativeText("可以继续后台运行，或停止研究后再关闭；原有股票规则不受影响。")
+        background = dialog.addButton("继续后台", QMessageBox.ButtonRole.AcceptRole)
+        stop = dialog.addButton("停止研究后关闭", QMessageBox.ButtonRole.ActionRole)
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.setEscapeButton(cancel)
+        self._close_dialog = dialog
+
+        def finished(_result: int) -> None:
+            clicked = dialog.clickedButton()
+            self._close_dialog = None
+            dialog.deleteLater()
+            if clicked is background:
+                self._close_allowed = True
+                self.close()
+            elif clicked is stop:
+                self._close_wait = "launch" if self.research_page.launch_pending else "stop"
+                self._close_stop_accepted = False
+                self._close_fresh_read_started = False
+                self._close_read_pending = False
+                self._close_timer.start(30_000)
+                self.research_page.setEnabled(False)
+                self.statusBar().showMessage("正在停止研究；收到已停止状态后再关闭窗口…")
+                if self._close_wait == "stop":
+                    self.research_page.request_stop()
+
+        dialog.finished.connect(finished)
+        dialog.open()
+
+    def _show_unknown_research_close_dialog(self) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("无法确认后台研究状态")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText("目前无法确认研究状态。关闭窗口不会停止可能存在的后台研究。")
+        dialog.setInformativeText("可以保持窗口打开以恢复连接，也可以只关闭这个窗口。")
+        close = dialog.addButton("仍然关闭", QMessageBox.ButtonRole.AcceptRole)
+        keep = dialog.addButton("保持打开", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(keep)
+        dialog.setEscapeButton(keep)
+        self._close_dialog = dialog
+
+        def finished(_result: int) -> None:
+            self._close_dialog = None
+            clicked = dialog.clickedButton()
+            dialog.deleteLater()
+            if clicked is close:
+                self._close_allowed = True
+                self.close()
+
+        dialog.finished.connect(finished)
+        dialog.open()
+
+    def _research_state_received(self, value: object) -> None:
+        runtime = value.get("runtime") if isinstance(value, dict) else None
+        state = runtime.get("state") if isinstance(runtime, dict) else None
+        if not isinstance(state, str) or state not in {"STOPPED", "RUNNING", "STOPPING"}:
+            if self._close_wait is not None:
+                self._abort_research_close("无法确认研究状态，窗口保持打开；请刷新状态后重试。")
+            return
+        self._research_state = state
+        self._close_state_unverified = False
+        if self._close_wait == "inspect":
+            self._close_wait = None
+            self._close_timer.stop()
+            QTimer.singleShot(0, self.close)
+        elif self._close_wait == "stop" and self._close_stop_accepted and self._close_read_pending:
+            self._close_read_pending = False
+            if state == "STOPPED":
+                self._close_wait = None
+                self._close_timer.stop()
+                self._close_poll.stop()
+                self._close_allowed = True
+                QTimer.singleShot(0, self.close)
+
+    def _research_close_action(self, receipt: object) -> None:
+        if not isinstance(receipt, ActionReceipt):
+            return
+        if receipt.accepted and receipt.action in {"research-start", "research-once", "research-transcribe"} and "演示" not in receipt.message:
+            self._research_state = "RUNNING"
+        if self._close_wait == "launch" and receipt.action in {"research-start", "research-once", "research-transcribe"}:
+            self._close_wait = "stop"
+            self.research_page.request_stop()
+            return
+        if self._close_wait != "stop" or receipt.action != "research-stop":
+            return
+        if not receipt.accepted:
+            self._abort_research_close("停止请求未被接受，窗口保持打开；请检查研究状态后重试。")
+            return
+        self._close_stop_accepted = True
+        self._close_poll.start()
+        self._poll_close_confirmation()
+
+    def _poll_close_confirmation(self) -> None:
+        if self._close_wait == "stop" and self._close_stop_accepted and not self._client_busy and not self._close_read_pending:
+            self._close_fresh_read_started = True
+            self._close_read_pending = True
+            self.client.refresh_research()
+
+    def _research_close_failed(self, purpose: str, _code: str) -> None:
+        if self._close_wait is not None and purpose in {"research-get", "research-stop", "research-start", "research-once", "research-transcribe", "transport"}:
+            self._abort_research_close("未能确认研究已停止，窗口保持打开；请检查 Guardian 连接后重试。")
+
+    def _close_confirmation_timeout(self) -> None:
+        self._abort_research_close("等待研究状态确认超时，窗口保持打开；请刷新状态后重试。")
+
+    def _abort_research_close(self, message: str) -> None:
+        self._research_state = None
+        self._close_state_unverified = True
+        self._close_wait = None
+        self._close_stop_accepted = False
+        self._close_fresh_read_started = False
+        self._close_read_pending = False
+        self._close_timer.stop()
+        self._close_poll.stop()
+        self.research_page.setEnabled(True)
+        self.statusBar().showMessage(message)

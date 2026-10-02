@@ -153,3 +153,12 @@ yfinance、AKShare、Finnhub、NewsAPI 和模型服务各有个人使用、开�
 ## 演进边界
 
 短期继续稳定“桌面 App + 单实例 Guardian + SQLite + Telegram/WhatsApp + heartbeat”，不为了“像大型系统”提前引入微服务、消息队列或 PostgreSQL。未来可选的只读 Web、更多通知渠道和授权 provider 必须建立在相同契约上；任何界面都不能增加交易动作或弱化 fail-closed 语义。安装、自启与 IPC 细节见[桌面指南](DESKTOP.md)。
+
+
+## 按需研究子系统
+
+`research.service.ResearchService` 在 Guardian 内持有独立可取消工作线程。`research.get` 与分页 `research.detail` 仅读取本地记录，`research.command` 对设置、订阅、导入、单次/开始/停止实施严格参数校验。所有入口复用现有 IPC 身份鉴权。初始化及重启状态始终为 STOPPED，不注册默认四小时新闻任务。
+
+`research.connectors` 与 `network` 负责公开 feed、正文和字幕读取；DNS 固定、跳转校验、超时、大小和数量上限在边界执行。`ingest` 处理文本和配置好的本地转写子进程。完整度与错误状态作为数据保留，来源文字不能变成执行指令。
+
+`research.store` 在同一 SQLite 的独立 research_* 表保存订阅、内容版本、提取缓存、报告、设置和扫描记录。首次迁移先备份已有数据库。`analysis` 将严格结构的 AI 提取与确定性时效/市场门禁分开；研究不写 signal_state，也不触发交易或改变规则监控颜色。详情见 [研究操作说明](RESEARCH.md) 与 OpenSpec `add-on-demand-investment-research`。

@@ -27,7 +27,7 @@ flowchart LR
 支持 Python 3.11 和 3.12。源码工作区中安装桌面、Guardian 和 Telegram 依赖：
 
 ```bash
-uv sync --frozen --extra desktop --extra notifications --extra futu
+uv sync --frozen --extra desktop --extra notifications --extra futu --extra ai --extra cn-data
 ```
 
 从构建好的 wheel 安装时使用相同 extras：
@@ -221,3 +221,6 @@ Cloud API 的 `2xx` 和 `wamid` 只证明 Meta 接受请求。手机侧的 `sent
 ## 永久边界
 
 桌面 App、Guardian 与移动提醒都只服务于人工复核。它们不接收券商凭据，不产生订单，不点击券商界面，不把 `GREEN` 解释为资产安全，也不把 `BUY_REVIEW` / `SELL_REVIEW` 解释为交易指令。
+
+
+投资研究页面的单次扫描、跟踪开关、作者订阅与访谈导入见[研究使用说明](RESEARCH.md)。发布构建包含研究模块、Anthropic SDK 和 CN 数据依赖；API 凭据、作者授权和本地转写器仍需单独配置，安装不启动新闻扫描。

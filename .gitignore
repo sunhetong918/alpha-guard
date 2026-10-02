@@ -36,3 +36,6 @@ dist/
 .idea/
 .vscode/
 state/scores.json
+
+# Local agent session data
+.zcode/

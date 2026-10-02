@@ -41,7 +41,7 @@ jobs:
 
       - name: Type check
         run: >-
-          uv run mypy analysis data desktop guardian news notifier reliability signals state
+          uv run mypy analysis data desktop guardian news notifier reliability research signals state
           config.py scheduler.py main.py
 
       - name: Build and smoke installed wheel

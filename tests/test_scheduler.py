@@ -99,7 +99,9 @@ def test_build_scheduler_configures_local_cron_and_overlap_safety() -> None:
     def summary(market: str) -> None:
         del market
 
-    scheduler = build_scheduler(scan_market, scan_news, summary)
+    scheduler = build_scheduler(
+        scan_market, scan_news, summary, news_interval_minutes=15
+    )
     jobs = {job.id: job for job in scheduler.get_jobs()}
     assert set(jobs) == {
         "market-scan:US",
@@ -117,6 +119,18 @@ def test_build_scheduler_configures_local_cron_and_overlap_safety() -> None:
     assert jobs["market-scan:US"].trigger.timezone == NEW_YORK
     assert jobs["market-scan:HK"].trigger.timezone == HONG_KONG
     assert jobs["news-scan"].trigger.timezone == NEWS_TIMEZONE
+
+
+def test_news_monitoring_is_not_started_by_default() -> None:
+    scheduler = build_scheduler(lambda market: None, lambda: None)
+    assert scheduler.get_job("news-scan") is None
+    build_scheduler(
+        lambda market: None, lambda: None,
+        scheduler=scheduler, news_interval_minutes=5,
+    )
+    assert scheduler.get_job("news-scan") is not None
+    build_scheduler(lambda market: None, lambda: None, scheduler=scheduler)
+    assert scheduler.get_job("news-scan") is None
 
 
 def test_freshness_context_uses_completed_exchange_sessions_not_fixed_age() -> None:

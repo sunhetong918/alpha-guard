@@ -378,6 +378,11 @@ def _base_yfinance_fields(
 
     fields = {
         "price": price,
+        # Research intraday gates require volume's own provider event time.
+        # A fresh Futu price must not refresh an older Yahoo volume observation.
+        "volume": _to_finite_float(info.get("regularMarketVolume")),
+        "volume_source_as_of": _as_of_from_info(info),
+        "volume_provider": "yfinance",
         "pe_ttm": _normalize_number(info.get("trailingPE"), "pe_ttm", issues),
         "pb": _normalize_number(info.get("priceToBook"), "pb", issues),
         "roe": roe,

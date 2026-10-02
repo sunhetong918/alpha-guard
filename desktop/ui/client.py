@@ -55,6 +55,8 @@ class GuardianClient(QObject):
     action_completed = Signal(object)
     configuration_saved = Signal(object)
     connection_state_changed = Signal(str)
+    research_ready = Signal(object)
+    research_detail_ready = Signal(object)
 
     def refresh(self) -> None:
         raise NotImplementedError
@@ -65,8 +67,19 @@ class GuardianClient(QObject):
     def test_channel(self, channel: ChannelKind) -> None:
         raise NotImplementedError
 
-    def update_preferences(
-        self, preferences: Preferences, *, revision: int
+    def update_preferences(self, preferences: Preferences, *, revision: int) -> None:
+        raise NotImplementedError
+
+    def refresh_research(self) -> None:
+        raise NotImplementedError
+
+    def research_command(
+        self, command: str, fields: dict[str, Any] | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    def research_detail(
+        self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0
     ) -> None:
         raise NotImplementedError
 
@@ -84,6 +97,31 @@ class FixtureGuardianClient(GuardianClient):
         )
         self._payload: dict[str, Any] | None = None
         self._action_counter = 0
+        self._research_payload: dict[str, Any] = {
+            "runtime": {
+                "state": "STOPPED",
+                "stage": "idle",
+                "mode": None,
+                "next_run_at": None,
+                "last_run": None,
+            },
+            "settings": {
+                "markets": ["US", "HK"],
+                "horizons": ["swing", "long"],
+                "instruments": [],
+                "interval_minutes": 15,
+                "ai_enabled": False,
+                "news_enabled": True,
+                "news_sources": [],
+                "max_items": 20,
+                "max_ai_calls": 10,
+            },
+            "subscriptions": [],
+            "evidence": [],
+            "reports": [],
+            "runs": [],
+            "fixture": True,
+        }
 
     def _load(self) -> dict[str, Any]:
         if self._payload is None:
@@ -142,15 +180,46 @@ class FixtureGuardianClient(GuardianClient):
     def request_scan(self) -> None:
         self._action("scan", "已交给 Guardian；fixture 不执行外部调用")
 
+    def refresh_research(self) -> None:
+        QTimer.singleShot(
+            0, lambda: self.research_ready.emit(deepcopy(self._research_payload))
+        )
+
+    def research_command(
+        self, command: str, fields: dict[str, Any] | None = None
+    ) -> None:
+        values = fields or {}
+        if command == "configure" and isinstance(values.get("settings"), dict):
+            self._research_payload["settings"] = deepcopy(values["settings"])
+        elif command == "subscribe" and isinstance(values.get("subscription"), dict):
+            self._research_payload["subscriptions"].append(
+                {
+                    **deepcopy(values["subscription"]),
+                    "id": uuid.uuid4().hex,
+                }
+            )
+        elif command in {"subscription", "delete"}:
+            for item in list(self._research_payload["subscriptions"]):
+                if item.get("id") == values.get("id"):
+                    if command == "delete":
+                        self._research_payload["subscriptions"].remove(item)
+                    else:
+                        item["enabled"] = values.get("enabled", False)
+        self._action(f"research-{command}", "离线演示：仅模拟操作，未采集、转写或分析")
+        QTimer.singleShot(200, self.refresh_research)
+
+    def research_detail(
+        self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0
+    ) -> None:
+        self.request_failed.emit("research-detail", "fixture_unavailable")
+
     def test_channel(self, channel: ChannelKind) -> None:
         self._action(
             "test-channel",
             f"{channel.value} 测试回执已生成（fixture，不真实发送）",
         )
 
-    def update_preferences(
-        self, preferences: Preferences, *, revision: int
-    ) -> None:
+    def update_preferences(self, preferences: Preferences, *, revision: int) -> None:
         self.busy_changed.emit(True)
 
         def complete() -> None:
@@ -177,6 +246,9 @@ class LocalSocketGuardianClient(GuardianClient):
     adapter and is never returned in a DTO, frame log, status message, or UI
     field.  All method names come from Guardian's allowlisted protocol.
     """
+
+    _MAX_RESEARCH_PAGES = 100
+    _RESEARCH_COLLECTIONS = ("subscriptions", "evidence", "reports", "runs")
 
     _REFRESH_METHODS: tuple[tuple[str, dict[str, Any]], ...] = (
         ("health.get", {}),
@@ -241,12 +313,8 @@ class LocalSocketGuardianClient(GuardianClient):
                 )
                 handle = self._transport.request(
                     request,
-                    on_response=partial(
-                        self._on_response, operation_id, method
-                    ),
-                    on_error=partial(
-                        self._on_transport_error, operation_id, method
-                    ),
+                    on_response=partial(self._on_response, operation_id, method),
+                    on_error=partial(self._on_transport_error, operation_id, method),
                 )
             except QtTransportUnavailable:
                 self._on_failure(operation_id, method, "transport_unavailable")
@@ -276,6 +344,42 @@ class LocalSocketGuardianClient(GuardianClient):
             return
         self._start_operation("scan", (("scan.trigger", {}),))
 
+    def refresh_research(self) -> None:
+        if self._closed or any(
+            operation.get("purpose") == "research-get"
+            for operation in self._operations.values()
+        ):
+            return
+        self._start_operation(
+            "research-get", (("research.get", {}),), context={"page": 0}
+        )
+
+    def research_command(
+        self, command: str, fields: dict[str, Any] | None = None
+    ) -> None:
+        if self._closed:
+            return
+        self._start_operation(
+            f"research-{command}",
+            (("research.command", {**(fields or {}), "command": command}),),
+        )
+
+    def research_detail(
+        self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0
+    ) -> None:
+        if self._closed:
+            return
+        params: dict[str, Any] = {"kind": kind, "id": identity}
+        if offset:
+            params["offset"] = offset
+        if segment_offset:
+            params["segment_offset"] = segment_offset
+        self._start_operation(
+            "research-detail",
+            (("research.detail", params),),
+            context=params,
+        )
+
     def test_channel(self, channel: ChannelKind) -> None:
         if self._closed:
             return
@@ -287,9 +391,7 @@ class LocalSocketGuardianClient(GuardianClient):
             (("delivery.test", {"channel": channel.value}),),
         )
 
-    def update_preferences(
-        self, preferences: Preferences, *, revision: int
-    ) -> None:
+    def update_preferences(self, preferences: Preferences, *, revision: int) -> None:
         if self._closed:
             return
         payload = public_config_update(preferences, revision)
@@ -299,13 +401,9 @@ class LocalSocketGuardianClient(GuardianClient):
             context={"preferences": preferences, "payload": payload},
         )
 
-    def _on_response(
-        self, operation_id: str, method: str, response: object
-    ) -> None:
+    def _on_response(self, operation_id: str, method: str, response: object) -> None:
         if isinstance(response, RpcErrorResponse):
-            self._on_failure(
-                operation_id, method, response.error.data.kind
-            )
+            self._on_failure(operation_id, method, response.error.data.kind)
             return
         if isinstance(response, RpcSuccessResponse):
             self._on_success(operation_id, method, response.result)
@@ -334,9 +432,7 @@ class LocalSocketGuardianClient(GuardianClient):
         self._on_failure(operation_id, method, code)
 
     @Slot(str, str, object)
-    def _on_success(
-        self, operation_id: str, method: str, result: object
-    ) -> None:
+    def _on_success(self, operation_id: str, method: str, result: object) -> None:
         operation = self._operations.get(operation_id)
         if operation is None:
             return
@@ -366,10 +462,82 @@ class LocalSocketGuardianClient(GuardianClient):
             self.configuration_saved.emit(operation.get("context"))
             self._operations.pop(operation_id, None)
             QTimer.singleShot(0, self.refresh)
+        elif purpose in {"research-get", "research-detail"}:
+            self._operations.pop(operation_id, None)
+            value = operation["results"].get(method)
+            if not isinstance(value, dict):
+                self.request_failed.emit(purpose, "invalid_response")
+            elif purpose == "research-get":
+                self._complete_research_page(operation, value)
+            else:
+                self.research_detail_ready.emit({**operation["context"], "item": value})
         else:
             self._complete_action(purpose, operation, method)
             self._operations.pop(operation_id, None)
+            if str(purpose).startswith("research-"):
+                QTimer.singleShot(0, self.refresh_research)
         self._emit_idle_if_needed()
+
+    def _complete_research_page(
+        self, operation: dict[str, Any], value: dict[str, Any]
+    ) -> None:
+        """Collect bounded read-only pages before publishing a complete snapshot."""
+        context = operation.get("context") or {}
+        expected_page = context.get("page", 0)
+        page = value.get("page", 0)
+        next_page = value.get("next_page")
+        runtime = value.get("runtime")
+        if (
+            type(page) is not int
+            or page != expected_page
+            or not isinstance(runtime, dict)
+            or not isinstance(value.get("settings"), dict)
+            or any(
+                not isinstance(value.get(key, []), list)
+                or any(not isinstance(item, dict) for item in value.get(key, []))
+                for key in self._RESEARCH_COLLECTIONS
+            )
+            or (
+                next_page is not None
+                and (
+                    type(next_page) is not int
+                    or next_page != page + 1
+                    or next_page >= self._MAX_RESEARCH_PAGES
+                )
+            )
+        ):
+            self.request_failed.emit("research-get", "invalid_response")
+            return
+        last_run = runtime.get("last_run")
+        if last_run is not None and (
+            not isinstance(last_run, dict)
+            or not isinstance(last_run.get("sources", []), list)
+            or any(not isinstance(item, dict) for item in last_run.get("sources", []))
+        ):
+            self.request_failed.emit("research-get", "invalid_response")
+            return
+
+        snapshot = context.get("snapshot")
+        if snapshot is None:
+            snapshot = deepcopy(value)
+        else:
+            for key in self._RESEARCH_COLLECTIONS:
+                snapshot.setdefault(key, []).extend(value.get(key, []))
+            if last_run is not None:
+                first_run = snapshot["runtime"].get("last_run")
+                if first_run is None:
+                    snapshot["runtime"]["last_run"] = deepcopy(last_run)
+                else:
+                    first_run.setdefault("sources", []).extend(last_run.get("sources", []))
+        if next_page is None:
+            snapshot["next_page"] = None
+            self.research_ready.emit(snapshot)
+        else:
+            self._start_operation(
+                "research-get",
+                (("research.get", {"page": next_page}),),
+                context={"page": next_page, "snapshot": snapshot},
+            )
 
     def _complete_refresh(self, operation: dict[str, Any]) -> None:
         results = operation["results"]
@@ -424,9 +592,7 @@ class LocalSocketGuardianClient(GuardianClient):
             self.action_completed.emit(receipt)
 
     @Slot(str, str, str)
-    def _on_failure(
-        self, operation_id: str, method: str, safe_code: str
-    ) -> None:
+    def _on_failure(self, operation_id: str, method: str, safe_code: str) -> None:
         operation = self._operations.pop(operation_id, None)
         if operation is None:
             return
@@ -478,6 +644,8 @@ class ManagedGuardianClient(GuardianClient):
         transport.action_completed.connect(self.action_completed)
         transport.configuration_saved.connect(self.configuration_saved)
         transport.connection_state_changed.connect(self.connection_state_changed)
+        transport.research_ready.connect(self.research_ready)
+        transport.research_detail_ready.connect(self.research_detail_ready)
 
     def refresh(self) -> None:
         if not self._closed:
@@ -487,13 +655,29 @@ class ManagedGuardianClient(GuardianClient):
         if not self._closed:
             self._transport.request_scan()
 
+    def refresh_research(self) -> None:
+        if not self._closed:
+            self._transport.refresh_research()
+
+    def research_command(
+        self, command: str, fields: dict[str, Any] | None = None
+    ) -> None:
+        if not self._closed:
+            self._transport.research_command(command, fields)
+
+    def research_detail(
+        self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0
+    ) -> None:
+        if not self._closed:
+            self._transport.research_detail(
+                kind, identity, offset=offset, segment_offset=segment_offset
+            )
+
     def test_channel(self, channel: ChannelKind) -> None:
         if not self._closed:
             self._transport.test_channel(channel)
 
-    def update_preferences(
-        self, preferences: Preferences, *, revision: int
-    ) -> None:
+    def update_preferences(self, preferences: Preferences, *, revision: int) -> None:
         if not self._closed:
             self._transport.update_preferences(preferences, revision=revision)
 
