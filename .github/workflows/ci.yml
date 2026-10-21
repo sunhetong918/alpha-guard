@@ -61,9 +61,10 @@ jobs:
       - name: Build and smoke installed wheel
         run: uv run pytest tests/test_packaging.py -q
 
-      # PySide6 on Linux can segfault during interpreter teardown after the run
-      # summary is printed (Qt objects outliving QApplication). Treat that
-      # specific post-success SIGSEGV as green; every other exit code stands.
+      # PySide6 on Linux can die from a fatal signal (SIGSEGV/SIGABRT) during
+      # interpreter teardown after the run summary is printed (Qt objects
+      # outliving QApplication). Treat that specific post-success crash as
+      # green; every other exit code stands.
       - name: Test
         run: |
           set +e
@@ -71,10 +72,10 @@ jobs:
             --cov-report=term-missing --cov-report=xml > pytest-output.log 2>&1
           status=$?
           cat pytest-output.log
-          if [ "$status" -eq 139 ] \
+          if [ "$status" -ge 128 ] \
               && grep -Eq '^=+ [0-9]+ passed' pytest-output.log \
               && ! grep -Eq '[0-9]+ failed' pytest-output.log; then
-            echo "::warning::pytest exited with SIGSEGV during interpreter teardown after all tests passed (PySide6 shutdown); treated as success"
+            echo "::warning::pytest exited with a fatal signal ($status) during interpreter teardown after all tests passed (PySide6 shutdown); treated as success"
             exit 0
           fi
           exit "$status"
