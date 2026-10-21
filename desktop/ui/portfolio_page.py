@@ -9,9 +9,9 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .client import GuardianClient
@@ -23,6 +23,13 @@ FIELDS = {"market": "市场", "ticker": "证券代码", "quantity": "数量",
 ERRORS = {"column_count": "列数与表头不一致", "instrument": "市场或证券代码无效",
           "duplicate_instrument": "同一证券重复出现", "quantity": "数量须为非负数，最多八位小数",
           "unit_cost_or_currency": "单位成本与受支持币种须成对填写"}
+CURRENCIES = ("USD", "HKD", "CNY", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "SGD")
+STATUSES = {"estimated": "已估值", "quote_missing": "缺价", "quote_invalid": "报价无效",
+            "quote_currency_invalid": "报价币种无效", "stale": "报价过期", "time_unknown": "报价时间未知",
+            "time_in_future": "报价时间异常", "fx_missing": "缺汇率", "fx_stale": "汇率过期",
+            "quantity_invalid": "数量无效", "budget_exhausted": "超出取价预算"}
+MISSING_HINTS = {"缺价": "点击“联网取价（显式）”后仍失败的证券保持不可估。",
+                 "缺汇率": "基准币种所需汇率未取得；该持仓不折算、不计零。"}
 MAX_BYTES = 256_000
 
 
@@ -33,6 +40,7 @@ class PortfolioPage(QWidget):
         self._pending: dict[str, dict[str, Any]] = {}
         self._preview: dict[str, Any] | None = None
         self._current: dict[str, Any] | None = None
+        self._concentration: dict[str, Any] | None = None
         self._unknown: list[str] = []
         self._source_label = "手工输入.csv"
         root = QVBoxLayout(self)
@@ -99,6 +107,60 @@ class PortfolioPage(QWidget):
         self.message.setTextFormat(Qt.TextFormat.PlainText)
         self.message.setWordWrap(True)
         root.addWidget(self.message)
+        root.addWidget(PageHeading("CONCENTRATION", "只读集中度", "在已保存快照上计算单股与币种占比；读取和计算不联网，取价/取汇率是显式动作且有调用预算。缺价或缺汇率的持仓列为不可估，不用 0 填充，也不冒充完整组合占比。"))
+        options = QHBoxLayout()
+        self.base_currency = QComboBox()
+        self.base_currency.addItem("不统一基准", "")
+        for code in CURRENCIES:
+            self.base_currency.addItem(code, code)
+        self.single_threshold = QDoubleSpinBox()
+        self.single_threshold.setRange(0.0, 99.0)
+        self.single_threshold.setDecimals(1)
+        self.single_threshold.setSpecialValueText("不启用")
+        self.currency_threshold = QDoubleSpinBox()
+        self.currency_threshold.setRange(0.0, 99.0)
+        self.currency_threshold.setDecimals(1)
+        self.currency_threshold.setSpecialValueText("不启用")
+        self.top_n = QSpinBox()
+        self.top_n.setRange(1, 20)
+        for label, widget in (("基准币种", self.base_currency), ("单股阈值 %", self.single_threshold),
+                              ("币种阈值 %", self.currency_threshold), ("前 N 大", self.top_n)):
+            column = QVBoxLayout()
+            column.addWidget(QLabel(label))
+            column.addWidget(widget)
+            options.addLayout(column)
+        self.save_options = QPushButton("保存集中度设置")
+        self.price_button = QPushButton("联网取价（显式）")
+        self.price_button.setProperty("danger", True)
+        self.load_concentration = QPushButton("读取集中度")
+        self.save_options.clicked.connect(self._save_options)
+        self.price_button.clicked.connect(self._price)
+        self.load_concentration.clicked.connect(self._load_concentration)
+        for button in (self.save_options, self.price_button, self.load_concentration):
+            options.addWidget(button)
+        options.addStretch(1)
+        root.addLayout(options)
+        self.concentration_summary = QLabel("尚未计算；需先有快照并显式取价。")
+        self.concentration_summary.setWordWrap(True)
+        self.concentration_summary.setTextFormat(Qt.TextFormat.PlainText)
+        root.addWidget(self.concentration_summary)
+        self.concentration_table = QTableWidget(0, 8)
+        self.concentration_table.setHorizontalHeaderLabels(
+            ["证券", "数量", "价格", "币种", "市值(原币)", "基准市值", "占比 %", "状态"])
+        self.concentration_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.concentration_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.concentration_table.setMinimumHeight(140)
+        root.addWidget(self.concentration_table)
+        self.currency_table = QTableWidget(0, 3)
+        self.currency_table.setHorizontalHeaderLabels(["币种", "市值", "占比 %"])
+        self.currency_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.currency_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.currency_table.setMaximumHeight(120)
+        root.addWidget(self.currency_table)
+        self.concentration_message = QLabel("")
+        self.concentration_message.setTextFormat(Qt.TextFormat.PlainText)
+        self.concentration_message.setWordWrap(True)
+        root.addWidget(self.concentration_message)
         self.csv_text.textChanged.connect(self._headers_changed)
         self.account.textChanged.connect(self._account_changed)
         self.snapshot_date.textChanged.connect(self._invalidate)
@@ -199,6 +261,59 @@ class PortfolioPage(QWidget):
         if self._current is not None and self.undo_button.isEnabled():
             self._send("portfolio_undo", {"account": self.account.text().strip(), "expected_revision": self._current["revision"]})
 
+    def _options(self) -> dict[str, Any]:
+        single = None if self.single_threshold.value() <= 0 else self.single_threshold.value()
+        currency = None if self.currency_threshold.value() <= 0 else self.currency_threshold.value()
+        return {"base_currency": self.base_currency.currentData() or None,
+                "single_threshold": single, "currency_threshold": currency,
+                "top_n": self.top_n.value()}
+
+    def _save_options(self) -> None:
+        self._send("concentration_settings", {"settings": self._options()})
+
+    def _price(self) -> None:
+        self._send("concentration_price", {"account": self.account.text().strip()})
+
+    def _load_concentration(self) -> None:
+        self._send("concentration_get", {"account": self.account.text().strip()})
+
+    def _render_concentration(self, result: dict[str, Any]) -> None:
+        self._concentration = result
+        estimated, total = int(result.get("estimated_count") or 0), int(result.get("position_count") or 0)
+        base = result.get("base_currency")
+        scope = f"基准 {base}" if base else "各报价币种原值"
+        self.concentration_summary.setText(
+            f"快照 {result.get('snapshot_date') or '暂无'} · 已估值 {estimated}/{total} 项 · 分母为已估值部分（{scope}）"
+            f" · 合计 {result.get('estimated_total') or '0'} · 报价/汇率有效期 {result.get('quote_max_age_days')} 天")
+        rows = list(result.get("positions") or [])
+        self.concentration_table.setRowCount(len(rows))
+        for row, item in enumerate(rows):
+            values = (item.get("instrument"), item.get("quantity"), item.get("price") or "—",
+                      item.get("currency") or "—", item.get("value_native") or "—",
+                      item.get("value_base") or "—", item.get("weight") or "—",
+                      STATUSES.get(str(item.get("status")), str(item.get("status"))))
+            for column, text in enumerate(values):
+                self.concentration_table.setItem(row, column, QTableWidgetItem(str(text)))
+        currencies = list(result.get("currencies") or [])
+        self.currency_table.setRowCount(len(currencies))
+        for row, item in enumerate(currencies):
+            for column, text in enumerate((item.get("currency"), item.get("value"), item.get("weight"))):
+                self.currency_table.setItem(row, column, QTableWidgetItem(str(text)))
+        top = "、".join(f"{item.get('instrument')} {item.get('weight')}%" for item in result.get("top") or [])
+        breaches = list(result.get("breaches") or [])
+        lines = [f"前 N 大：{top or '无'}", result.get("currencies_note") or ""]
+        lines += [f"超阈值：{item.get('instrument')} {item.get('weight')}% > {item.get('threshold')}%"
+                  for item in breaches]
+        missing = list(result.get("missing") or [])
+        lines += [f"不可估：{item.get('instrument')}（{STATUSES.get(str(item.get('reason')), str(item.get('reason')))}）"
+                  for item in missing]
+        for item in missing:
+            hint = MISSING_HINTS.get(STATUSES.get(str(item.get("reason")), ""))
+            if hint:
+                lines.append(hint)
+                break
+        self.concentration_message.setText("\n".join(line for line in lines if line))
+
     def _show_rows(self, rows: list[dict[str, Any]], changes: list[dict[str, Any]] | None = None) -> None:
         by_key = {v["instrument"]: v for v in rows}
         change_map = {v["instrument"]: v["change"] for v in changes or []}
@@ -220,6 +335,22 @@ class PortfolioPage(QWidget):
         if request is None:
             return
         result = receipt.result or {}
+        if command.startswith("concentration_"):
+            if not receipt.accepted:
+                self.concentration_message.setText(receipt.message or "集中度操作未完成。")
+            elif command == "concentration_settings":
+                self.concentration_message.setText("集中度设置已保存。")
+            elif command == "concentration_price":
+                receipt_data = result.get("receipt") or {}
+                failed = len(receipt_data.get("failed") or [])
+                self.concentration_message.setText(
+                    f"取价完成：{receipt_data.get('stored_quotes')} 项报价、{receipt_data.get('stored_fx')} 项汇率；"
+                    f"{failed} 项失败保持不可估。读取与计算不联网。")
+                self._render_concentration(result.get("concentration") or {})
+            else:
+                self._render_concentration(result)
+            self._controls()
+            return
         if request["account"] != self.account.text().strip():
             self._controls()
             return
@@ -250,17 +381,26 @@ class PortfolioPage(QWidget):
         self._controls()
 
     def _failed(self, purpose: str, _code: str) -> None:
-        if self._pending.pop(purpose.removeprefix("research-"), None) is not None:
+        command = purpose.removeprefix("research-")
+        if self._pending.pop(command, None) is None:
+            return
+        if command.startswith("concentration_"):
+            self.concentration_message.setText("集中度操作失败；已保存的报价与设置保持不变。")
+        else:
             self._preview = None
             self.message.setText("读取或保存失败，输入已保留；请重新读取确认结果后再预览。")
-            self._controls()
+        self._controls()
 
     def _controls(self) -> None:
         writing = any(key in self._pending for key in ("portfolio_commit", "portfolio_undo"))
+        busy = any(key in self._pending for key in self._pending)
         self.commit_button.setEnabled(bool(self._preview and self._preview.get("can_commit")) and not self._pending)
         self.undo_button.setEnabled(bool(self._current and self._current.get("can_undo")) and not self._pending)
         self.preview_button.setEnabled(not writing and "portfolio_preview" not in self._pending)
         self.read_button.setEnabled(not writing and "portfolio_get" not in self._pending)
+        self.save_options.setEnabled("concentration_settings" not in self._pending)
+        self.price_button.setEnabled(not self._pending)
+        self.load_concentration.setEnabled(not self._pending and not busy)
         for widget in (self.account, self.snapshot_date, self.csv_text, self.file_button, self.example_button,
                        self.full_snapshot, self.confirm_unknown, *self.mapping.values()):
             widget.setEnabled(not writing)

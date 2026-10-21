@@ -10,6 +10,19 @@ from .service import ResearchService
 
 def execute(service: ResearchService, params: Mapping[str, Any]) -> dict[str, Any]:
     command = params.get("command")
+    if isinstance(command, str) and command.startswith("concentration_"):
+        from .concentration import ConcentrationError, execute_concentration
+
+        try:
+            result = execute_concentration(service.path, command,
+                                           {key: value for key, value in params.items() if key != "command"})
+        except ConcentrationError as exc:
+            reason = str(exc)
+            message = ("集中度设置无效：基准币种、阈值或 Top N 超出范围。"
+                       if reason == "concentration_settings_invalid" else "取价已停止，未完成的项保持不可估。")
+            return {"accepted": False, "command": command, "message": message,
+                    "result": {"status": reason}}
+        return {"accepted": True, "command": command, "result": result}
     if isinstance(command, str) and command.startswith("portfolio_"):
         from .portfolio import PortfolioConflictError, execute_portfolio
 
