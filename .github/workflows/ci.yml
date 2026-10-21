@@ -36,6 +36,15 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --frozen --all-groups --all-extras
 
+      # The packaging test installs the built wheel with `uv pip install --offline`,
+      # which resolves against cached registry metadata and newest-satisfying wheels.
+      # `uv sync --frozen` seeds only the locked wheels, so resolve once online into a
+      # throwaway venv to populate both; when the lock is current this is a cache hit.
+      - name: Warm registry cache for offline packaging test
+        run: >-
+          uv venv /tmp/uv-warm && uv pip install --python /tmp/uv-warm/bin/python
+          --all-extras .
+
       - name: Lint
         run: uv run ruff check .
 
