@@ -31,11 +31,13 @@ def create_application(
 ) -> tuple[QApplication, MainWindow]:
     """Create the desktop app; an omitted client means production Guardian."""
 
-    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
     existing = QApplication.instance()
     if existing is None:
+        # The rounding policy must be set before any QGuiApplication exists;
+        # setting it afterwards triggers a Qt warning at startup.
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
         app = QApplication(list(argv if argv is not None else sys.argv))
     elif isinstance(existing, QApplication):
         app = existing
