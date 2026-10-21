@@ -67,6 +67,7 @@ class DigestSettings(ResearchModel):
     topics: tuple[DigestTopic, ...] = Field(default=(), max_length=20)
     ai_summary: bool = False
     notify: bool = False
+    notify_channels: tuple[Literal["telegram", "whatsapp"], ...] = ("telegram", "whatsapp")
     max_items: int = Field(default=20, ge=1, le=100)
     updated_at: str = Field(default="", max_length=64)
 
@@ -77,11 +78,20 @@ class DigestSettings(ResearchModel):
             return tuple(dict(topic) if isinstance(topic, dict) else topic for topic in value)
         return value
 
+    @field_validator("notify_channels", mode="before")
+    @classmethod
+    def coerce_notify_channels(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
     @model_validator(mode="after")
     def unique_labels(self) -> DigestSettings:
         labels = [topic.label.casefold() for topic in self.topics]
         if len(labels) != len(set(labels)):
             raise ValueError("duplicate digest topic label")
+        if len(self.notify_channels) != len(set(self.notify_channels)):
+            raise ValueError("duplicate digest notification channel")
+        if self.notify and not self.notify_channels:
+            raise ValueError("select at least one digest notification channel")
         return self
 
 
@@ -242,9 +252,48 @@ class ExtractedThesis(ResearchModel):
         return values
 
 
-class ExtractionResult(ResearchModel):
+class GenerationParameters(ResearchModel):
+    """Only parameters actually controlled by this application; None is unknown."""
+
+    max_output_tokens: int | None = Field(default=None, ge=1, le=100_000)
+    timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    reasoning_effort: Literal["low"] | None = None
+    max_turns: int | None = Field(default=None, ge=1, le=1)
+    tools_enabled: bool = False
+
+
+class GenerationContext(ResearchModel):
+    """Trusted, bounded configuration captured by code, never supplied by a model."""
+
+    schema_version: Literal[1] = 1
+    config_version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider: Literal["anthropic", "codex_cli", "claude_cli", "openai_compatible",
+                      "anthropic_compatible", "injected_client"]
+    model: str = Field(min_length=1, max_length=160)
+    profile_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    profile_version: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    endpoint_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    analyzer_version: str = Field(min_length=1, max_length=80)
+    prompt_template_version: str = Field(min_length=1, max_length=80)
+    horizons: tuple[Horizon, ...] = Field(min_length=1, max_length=3)
+    instruments: tuple[ResearchInstrument, ...] = Field(max_length=100)
+    parameters: GenerationParameters
+
+    @field_validator("horizons", "instruments", mode="before")
+    @classmethod
+    def coerce_sequences(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+class ExtractedContent(ResearchModel):
+    """The complete model-authored schema, excluding trusted execution metadata."""
+
     claims: list[ExtractedClaim] = Field(default_factory=list, max_length=1000)
     theses: list[ExtractedThesis] = Field(default_factory=list, max_length=300)
+
+
+class ExtractionResult(ExtractedContent):
+    generation_context: GenerationContext | None = None
 
 
 class Citation(ResearchModel):
@@ -295,6 +344,7 @@ class ResearchReport(ResearchModel):
     reference_price: float | None = Field(default=None, gt=0)
     market_context: dict[str, Any] = Field(default_factory=dict)
     analyzer_version: str
+    generation_context: GenerationContext | None = None
     independent_source_count: int = Field(default=1, ge=1)
 
     @field_validator("created_at", "valid_until")

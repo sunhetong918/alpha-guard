@@ -16,6 +16,11 @@ from research.service import ResearchService
 from research.store import ResearchStore
 
 
+@pytest.fixture(autouse=True)
+def offline_digest_sources(monkeypatch):
+    monkeypatch.setattr("research.digest._default_collector", lambda *_: ([], []))
+
+
 def test_digest_settings_validation():
     from research.models import DigestSettings
 
@@ -88,16 +93,18 @@ def test_match_and_rank_is_deterministic_and_honest():
 
 def test_ai_summary_gate_rejects_unsupported_numbers_and_missing_keys():
     sections = [{"key": "US:AAPL", "kind": "instrument", "entries": [
-        {"title": "苹果营收 100 亿美元创新高"}]}]
+        {"evidence_id": "apple-proof", "title": "苹果营收 100 亿美元创新高"}]}]
 
     def good(_prompt):
-        return json.dumps({"sections": [{"key": "US:AAPL", "summary": "苹果营收创新高"}]})
+        return json.dumps({"sections": [{"key": "US:AAPL", "citations": [
+            {"evidence_id": "apple-proof", "quote": "苹果营收 100 亿美元创新高"}]}]})
 
     outcome = _ai_section_summaries(sections, model_text=good)
     assert outcome["status"] == "generated" and outcome["sections"]["US:AAPL"].endswith("创新高")
 
     def invented(_prompt):
-        return json.dumps({"sections": [{"key": "US:AAPL", "summary": "营收达到 200 亿美元"}]})
+        return json.dumps({"sections": [{"key": "US:AAPL", "citations": [
+            {"evidence_id": "apple-proof", "quote": "营收达到 200 亿美元"}]}]})
 
     assert _ai_section_summaries(sections, model_text=invented)["status"] == "rejected"
 
@@ -194,7 +201,7 @@ def test_scheduler_resumes_only_when_enabled_and_stops_cleanly(tmp_path, monkeyp
     assert runs == ["schedule"] and scheduler.state == "STOPPED"
 
 
-def test_manual_digest_single_flight_and_busy_recording(tmp_path):
+def test_manual_digest_single_flight_and_busy_recording(tmp_path, monkeypatch):
     database = tmp_path / "state.db"
     gate = threading.Event()
 
@@ -202,6 +209,7 @@ def test_manual_digest_single_flight_and_busy_recording(tmp_path):
         gate.wait(5)
         return [], []
 
+    monkeypatch.setattr("research.digest._default_collector", collector)
     first = submit_manual_digest(database)
     assert first["accepted"] is True
     duplicate = submit_manual_digest(database)

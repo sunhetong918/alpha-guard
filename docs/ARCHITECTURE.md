@@ -161,4 +161,8 @@ yfinance、AKShare、Finnhub、NewsAPI 和模型服务各有个人使用、开�
 
 `research.connectors` 与 `network` 负责公开 feed、正文和字幕读取；DNS 固定、跳转校验、超时、大小和数量上限在边界执行。`ingest` 处理文本和配置好的本地转写子进程。完整度与错误状态作为数据保留，来源文字不能变成执行指令。
 
-`research.store` 在同一 SQLite 的独立 research_* 表保存订阅、内容版本、提取缓存、报告、设置和扫描记录。首次迁移先备份已有数据库。`analysis` 将严格结构的 AI 提取与确定性时效/市场门禁分开；研究不写 signal_state，也不触发交易或改变规则监控颜色。详情见 [研究操作说明](RESEARCH.md) 与 OpenSpec `add-on-demand-investment-research`。
+`research.store` 在同一 SQLite 的独立 research_* 表保存订阅、内容版本、提取缓存、报告、设置和扫描记录。首次迁移先备份已有数据库。`analysis` 将严格结构的 AI 提取与确定性时效/市场门禁分开；研究不写 signal_state，也不触发交易或改变规则监控颜色。当前功能见 [研究操作说明](RESEARCH.md)，后续改动统一见 [OpenSpec](../openspec/specs/alpha-guard/spec.md)。
+
+`research.overview` 用只读事务聚合单证券的自选、规则、逐证券扫描回执、报告、核验与事件；报告/事件窗口各五条，查询受执行预算约束。概览不会迁移库或联网；报告表达式索引在写入前备份并建立。历史未记录的逐证券扫描时间保持缺失。
+
+`GenerationContext` 由执行边界在分析开始时冻结，并随报告/缓存保存，模型输出不能提供该字段。只包含白名单的非秘密配置与实际参数；旧报告保持空值。`research.progress` 在同库记录单次扫描的冻结输入与条目状态，模型调用前持久扣减预算，报告与完成标记同事务提交。恢复必须获得原有 `ResearchLease` 并由用户显式发起；比较证据版本、配置、UTC 日期和原行情时效，未确认调用需额外确认且不返还预算。不承诺外部调用恰好一次。

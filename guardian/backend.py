@@ -212,6 +212,9 @@ class AlphaGuardBackend(GuardianBackend):
             ) from None
 
     def close_research(self) -> None:
+        from research.events import stop_event_workers
+
+        stop_event_workers(STATE_PATH)
         if self._digest_scheduler is not None:
             self._digest_scheduler.stop()
             self._digest_scheduler = None

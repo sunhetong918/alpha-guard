@@ -1,4 +1,4 @@
-"""Main desktop shell: compact rail, duty header, and five operational views."""
+"""Main desktop shell and connected local investment workflows."""
 
 from __future__ import annotations
 
@@ -9,11 +9,14 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QStackedWidget,
+    QScrollArea,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -29,12 +32,18 @@ from .pages import (
     SettingsPage,
 )
 from .research_page import ResearchPage
+from .watchlist_page import WatchlistPage
+from .review_page import ReviewPage
+from .progress_page import RunProgressPage
+from .portfolio_page import PortfolioPage
+from .event_page import EventCalendarPage
+from .instrument_page import InstrumentOverviewPage
 from .widgets import StatusBadge
 
 
 NAV_ITEMS = (
     ("overview", "◎", "值班摘要"),
-    ("assets", "◇", "标的责任"),
+    ("assets", "◇", "自选股票"),
     ("incidents", "!", "事故记录"),
     ("providers", "≋", "外部能力"),
     ("settings", "⚙", "设置与通道"),
@@ -178,6 +187,48 @@ class MainWindow(QMainWindow):
         self.providers_page = ProvidersPage()
         self.settings_page = SettingsPage()
         self.research_page = ResearchPage(self.client)
+        self.watchlist_page = WatchlistPage(self.client)
+        self.instrument_page = InstrumentOverviewPage(self.client)
+        self.instrument_scroll = self._workflow_scroll(self.instrument_page)
+        self.portfolio_page = PortfolioPage(self.client)
+        self.portfolio_scroll = self._workflow_scroll(self.portfolio_page)
+        self._instrument_return_key = ""
+        self.assets_tabs = QTabWidget()
+        self.watchlist_scroll = self._workflow_scroll(self.watchlist_page)
+        self.assets_tabs.addTab(self.watchlist_scroll, "自选与规则")
+        self.assets_tabs.addTab(self.assets_page, "监控证据")
+        self.assets_tabs.addTab(self.instrument_scroll, "证券概览")
+        self.assets_tabs.addTab(self.portfolio_scroll, "只读持仓")
+        self.assets_tabs.currentChanged.connect(self._activate_assets_tab)
+        self.instrument_return_button = QPushButton("返回证券概览")
+        self.instrument_return_button.hide()
+        self.instrument_return_button.clicked.connect(
+            lambda: self._show_instrument_overview(self._instrument_return_key))
+        research_layout = self.research_page.layout()
+        if isinstance(research_layout, QVBoxLayout):
+            research_layout.insertWidget(1, self.instrument_return_button)
+        self.review_page = ReviewPage(self.client)
+        self.progress_page = RunProgressPage(self.client)
+        self.event_page = EventCalendarPage(self.client)
+        self.review_scroll = self._workflow_scroll(self.review_page)
+        self.progress_scroll = self._workflow_scroll(self.progress_page)
+        self.event_scroll = self._workflow_scroll(self.event_page)
+        self.research_page.tabs.insertTab(1, self.review_scroll, "核验与复盘")
+        self.research_page.tabs.insertTab(2, self.event_scroll, "事件日历")
+        self.research_page.tabs.insertTab(3, self.progress_scroll, "任务与续跑")
+        self.research_page.tabs.currentChanged.connect(self._activate_workflow_tab)
+        self.watchlist_page.view_research_requested.connect(self._show_instrument_review)
+        self.watchlist_page.view_events_requested.connect(self._show_instrument_events)
+        self.watchlist_page.overview_requested.connect(self._show_instrument_overview)
+        self.instrument_page.back_requested.connect(self._return_to_watchlist)
+        self.instrument_page.review_requested.connect(self._overview_review)
+        self.instrument_page.events_requested.connect(self._overview_events)
+        self.instrument_page.report_requested.connect(self._overview_report)
+        self.research_page.instrument_requested.connect(self._show_instrument_overview)
+        self.client.research_detail_ready.connect(self._update_instrument_return)
+        self.research_page.review_requested.connect(self._show_report_review)
+        self.review_page.view_report_requested.connect(self._show_original_report)
+        self.progress_page.report_requested.connect(self._show_original_report)
         self.pages = (
             self.overview_page,
             self.assets_page,
@@ -187,7 +238,7 @@ class MainWindow(QMainWindow):
             self.research_page,
         )
         for page in self.pages:
-            self.stack.addWidget(page)
+            self.stack.addWidget(self.assets_tabs if page is self.assets_page else page)
         stage_layout.addWidget(self.stack, 1)
         stage_layout.addWidget(self._build_safety_footer())
         root.addWidget(stage, 1)
@@ -292,6 +343,114 @@ class MainWindow(QMainWindow):
             self.research_page.activate()
         else:
             self.research_page.deactivate()
+        if key == "assets" and self.assets_tabs.currentWidget() is self.watchlist_scroll:
+            self.watchlist_page.activate()
+        else:
+            self.watchlist_page.deactivate()
+        self._activate_workflow_tab()
+
+    def _activate_assets_tab(self, _index: int = 0) -> None:
+        if self.stack.currentWidget() is not self.assets_tabs:
+            return
+        if self.assets_tabs.currentWidget() is self.portfolio_scroll:
+            self.portfolio_page.activate()
+        if self.assets_tabs.currentWidget() is self.watchlist_scroll:
+            self.watchlist_page.activate()
+        else:
+            self.watchlist_page.deactivate()
+            if self.assets_tabs.currentWidget() is self.instrument_scroll:
+                self.instrument_page.refresh()
+
+    def _show_instrument_overview(self, key: str) -> None:
+        if not key:
+            return
+        self.assets_tabs.blockSignals(True)
+        self.assets_tabs.setCurrentWidget(self.instrument_scroll)
+        self.assets_tabs.blockSignals(False)
+        self.show_page("assets")
+        self.instrument_page.show_instrument(key)
+
+    def _return_to_watchlist(self) -> None:
+        self.assets_tabs.blockSignals(True)
+        self.assets_tabs.setCurrentWidget(self.watchlist_scroll)
+        self.assets_tabs.blockSignals(False)
+        self.show_page("assets")
+
+    def _set_instrument_return(self, key: str) -> None:
+        self._instrument_return_key = key
+        self.instrument_return_button.setText(f"返回 {key} 证券概览")
+        self.instrument_return_button.setVisible(bool(key))
+
+    def _overview_review(self, key: str) -> None:
+        self._set_instrument_return(key)
+        self._show_instrument_review(key)
+
+    def _overview_events(self, key: str) -> None:
+        self._set_instrument_return(key)
+        self._show_instrument_events(key)
+
+    def _overview_report(self, report_id: str) -> None:
+        self._set_instrument_return(self.instrument_page.instrument)
+        self._show_original_report(report_id)
+
+    def _update_instrument_return(self, payload: object) -> None:
+        if (not self._instrument_return_key or not isinstance(payload, dict)
+                or payload.get("kind") != "report"
+                or payload.get("id") != self.research_page._selected.get("report")):
+            return
+        key = self.research_page._report_instrument()
+        if key:
+            self._set_instrument_return(key)
+
+    @staticmethod
+    def _workflow_scroll(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        layout = page.layout()
+        if layout is not None:
+            layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        scroll.setWidget(page)
+        return scroll
+
+    def _activate_workflow_tab(self, _index: int = 0) -> None:
+        current = (self.research_page.tabs.currentWidget()
+                   if self.stack.currentWidget() is self.research_page else None)
+        for page, container in ((self.review_page, self.review_scroll),
+                                (self.event_page, self.event_scroll),
+                                (self.progress_page, self.progress_scroll)):
+            if container is current:
+                page.activate()
+            else:
+                page.deactivate()
+
+    def _show_instrument_review(self, key: str) -> None:
+        self.review_page.set_instrument(key)
+        self.research_page.tabs.setCurrentWidget(self.review_scroll)
+        self.show_page("research")
+
+    def _show_instrument_events(self, key: str) -> None:
+        self.event_page.set_instrument(key)
+        self.research_page.tabs.setCurrentWidget(self.event_scroll)
+        self.show_page("research")
+
+    def _show_report_review(self, report_id: str) -> None:
+        if not report_id:
+            return
+        self.research_page.tabs.setCurrentWidget(self.review_scroll)
+        self.show_page("research")
+        self.review_page.set_report(report_id)
+
+    def _show_original_report(self, report_id: str) -> None:
+        if not report_id:
+            return
+        self.show_page("research")
+        self.research_page._select_detail("report", report_id)
+        for index in range(self.research_page.tabs.count()):
+            panel = self.research_page.tabs.widget(index)
+            if panel is not None and panel.isAncestorOf(self.research_page.report_table):
+                self.research_page.tabs.setCurrentIndex(index)
+                break
 
     def set_snapshot(self, snapshot: DashboardSnapshot) -> None:
         self.snapshot = snapshot
@@ -315,7 +474,7 @@ class MainWindow(QMainWindow):
         self.connection_label.setText(
             f"Guardian {snapshot.health.version} · PID {snapshot.health.pid or '—'}"
         )
-        for page in self.pages:
+        for page in (*self.pages, self.watchlist_page, self.review_page, self.event_page):
             page.set_snapshot(snapshot)
         self.statusBar().showMessage(
             f"已载入回执 {snapshot.cockpit.receipt_id} · "

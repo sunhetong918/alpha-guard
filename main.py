@@ -2930,6 +2930,28 @@ async def run_stock_scan(
             "protection_event_id": protection_event_id,
             "protection_event_ids": protection_event_ids,
         }
+        if fixture_path is None and store is not None:
+            # A local overview needs an actual per-security receipt. Never
+            # substitute a global run timestamp or let optional metadata change
+            # the scan's protection/notification outcome.
+            try:
+                from research.overview import record_instrument_scans
+
+                observed_results = {item["ticker"]: item for item in results}
+                observations = []
+                for ticker, instrument in instruments:
+                    result_item = observed_results.get(ticker)
+                    if result_item is not None:
+                        unknown = result_item.get("decision") == EvaluationDecision.UNKNOWN.value
+                        observations.append({"market": instrument.market, "ticker": ticker,
+                            "status": "failed" if unknown else "ready",
+                            "detail": "unknown_evidence" if unknown else "evaluated"})
+                    elif ticker in errors:
+                        observations.append({"market": instrument.market, "ticker": ticker,
+                            "status": "failed", "detail": "data_unavailable"})
+                record_instrument_scans(STATE_PATH, observations, observed_at=data_completed_at)
+            except Exception:  # noqa: BLE001 - optional metadata cannot alter scan evidence
+                logger.warning("instrument_overview_receipt_failed")
         if record_run and store is not None:
             store.record_run(
                 f"stock-scan:{selected_market or 'ALL'}",

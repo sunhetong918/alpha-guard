@@ -16,6 +16,33 @@ from typing import Any
 
 from config import Settings
 from .ingest import _stop_process
+from .models import GenerationParameters
+
+_MAX_OUTPUT_TOKENS = 6000
+_CLI_MAX_TURNS = 1
+
+
+def generation_parameters(settings: Settings | None, profile: Any | None = None, *,
+                          client_supplied: bool = False) -> GenerationParameters:
+    """The same explicit limits used by requests and report configuration snapshots.
+
+    An injected SDK client controls its own timeout. CLI token limits and server
+    sampling defaults are not set here and must not be invented in a snapshot.
+    """
+    if profile is not None:
+        return GenerationParameters(max_output_tokens=_MAX_OUTPUT_TOKENS,
+                                    timeout_seconds=float(profile.timeout_seconds))
+    if client_supplied:
+        return GenerationParameters(max_output_tokens=_MAX_OUTPUT_TOKENS)
+    provider = getattr(settings, "research_model_provider", "anthropic")
+    if provider in {"codex_cli", "claude_cli"}:
+        return GenerationParameters(
+            timeout_seconds=float(getattr(settings, "research_model_timeout_seconds", 180)),
+            reasoning_effort="low" if provider == "codex_cli" else None,
+            max_turns=_CLI_MAX_TURNS,
+        )
+    return GenerationParameters(max_output_tokens=_MAX_OUTPUT_TOKENS,
+        timeout_seconds=min(float(getattr(settings, "http_timeout_seconds", 10)), 60.0))
 
 
 class ModelProviderError(RuntimeError):
@@ -86,6 +113,7 @@ def codex_executable(settings: Settings) -> str | None:
 
 def _codex_text(prompt: str, settings: Settings, *, system: str,
                 cancelled: Callable[[], bool] | None) -> str:
+    parameters = generation_parameters(settings)
     executable = codex_executable(settings)
     if executable is None:
         raise ModelProviderError("model_client_unavailable")
@@ -101,7 +129,7 @@ def _codex_text(prompt: str, settings: Settings, *, system: str,
                      "--skip-git-repo-check", "--json", "-o", str(result_file),
                      "--model", settings.research_codex_model,
                      "-c", "project_doc_max_bytes=0", "-c", 'web_search="disabled"',
-                     "-c", 'history.persistence="none"', "-c", 'model_reasoning_effort="low"',
+                     "-c", 'history.persistence="none"', "-c", f'model_reasoning_effort="{parameters.reasoning_effort}"',
                      "-c", 'approval_policy="never"', "--enable", "skip_host_skill_discovery"]
         for feature in ("shell_tool", "apps", "multi_agent", "view_image", "image_generation",
                         "tool_suggest", "unified_exec", "shell_snapshot", "sleep_tool", "skill_search",
@@ -116,7 +144,7 @@ def _codex_text(prompt: str, settings: Settings, *, system: str,
             process = subprocess.Popen(arguments, stdin=source, stdout=events, stderr=subprocess.DEVNULL,
                                        cwd=directory, shell=False, start_new_session=os.name != "nt")
             cleanup.callback(_stop_process, process)
-            deadline = time.monotonic() + settings.research_model_timeout_seconds
+            deadline = time.monotonic() + float(parameters.timeout_seconds or 180)
             while process.poll() is None:
                 if cancelled and cancelled():
                     raise ModelCancelled("model_cancelled")
@@ -144,7 +172,7 @@ def _codex_text(prompt: str, settings: Settings, *, system: str,
                 item = event.get("item", {})
                 if isinstance(item, dict) and item.get("type") not in {None, "agent_message", "reasoning", "error"}:
                     raise ModelProviderError("unexpected_model_tool_call")
-            if turns != 1:
+            if turns != parameters.max_turns:
                 raise ModelProviderError("model_turn_limit_exceeded")
             result = result_file.read_text(encoding="utf-8")
             if not result or len(result) > 100_000:
@@ -154,6 +182,7 @@ def _codex_text(prompt: str, settings: Settings, *, system: str,
 
 def _claude_text(prompt: str, settings: Settings, *, system: str,
                  cancelled: Callable[[], bool] | None) -> str:
+    parameters = generation_parameters(settings)
     executable = claude_executable(settings)
     if executable is None:
         raise ModelProviderError("model_client_unavailable")
@@ -164,7 +193,7 @@ def _claude_text(prompt: str, settings: Settings, *, system: str,
     arguments = [executable, "--print", "--safe-mode", "--output-format", "json",
                  "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                  "--disable-slash-commands", "--no-chrome", "--no-session-persistence",
-                 "--permission-mode", "dontAsk", "--max-turns", "1",
+                 "--permission-mode", "dontAsk", "--max-turns", str(parameters.max_turns),
                  "--model", settings.anthropic_model, "--system-prompt", system]
     environment = dict(os.environ)
     # The application uses the client's own existing login, never copies keys.
@@ -181,7 +210,7 @@ def _claude_text(prompt: str, settings: Settings, *, system: str,
                                        stderr=subprocess.DEVNULL, cwd=directory, env=environment,
                                        shell=False, start_new_session=os.name != "nt")
             cleanup.callback(_stop_process, process)
-            deadline = time.monotonic() + settings.research_model_timeout_seconds
+            deadline = time.monotonic() + float(parameters.timeout_seconds or 180)
             while process.poll() is None:
                 if cancelled and cancelled():
                     raise ModelCancelled("model_cancelled")
@@ -201,7 +230,7 @@ def _claude_text(prompt: str, settings: Settings, *, system: str,
                 raise ModelProviderError("invalid_model_response") from None
             if process.returncode or not isinstance(result, dict) or result.get("is_error") is True:
                 raise ModelProviderError("model_client_failed")
-            if result.get("num_turns", 1) != 1:
+            if result.get("num_turns", 1) != parameters.max_turns:
                 raise ModelProviderError("model_turn_limit_exceeded")
             text = result.get("result")
             if not isinstance(text, str) or not text or len(text) > 100_000:
@@ -209,12 +238,42 @@ def _claude_text(prompt: str, settings: Settings, *, system: str,
             return text
 
 
+def _profile_response_text(data: Any, protocol: str) -> str:
+    """Parse the same bounded model text for analysis and connection probes."""
+    if not isinstance(data, dict) or data.get("error") or data.get("type") == "error":
+        raise ModelProviderError("invalid_model_response")
+    text: Any = None
+    if protocol == "anthropic_compatible":
+        content = data.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise ModelProviderError("invalid_model_response")
+                if part.get("type") == "text":
+                    value = part.get("text")
+                    if not isinstance(value, str):
+                        raise ModelProviderError("invalid_model_response")
+                    parts.append(value)
+            text = "".join(parts)
+    elif protocol == "openai_compatible":
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                text = message.get("content")
+    if not isinstance(text, str) or not text.strip() or len(text) > 100_000:
+        raise ModelProviderError("invalid_model_response")
+    return text
+
+
 def _profile_text(prompt: str, profile: Any, api_key: str | None, *, system: str,
                   cancelled: Callable[[], bool] | None) -> str:
     from .model_http import model_post_json
     from .network import ContentAccessError
 
-    max_tokens = 6000
+    parameters = generation_parameters(None, profile)
+    max_tokens = parameters.max_output_tokens
     if profile.protocol == "anthropic_compatible":
         payload = {"model": profile.model, "max_tokens": max_tokens, "system": system,
                    "messages": [{"role": "user", "content": prompt}]}
@@ -227,30 +286,20 @@ def _profile_text(prompt: str, profile: Any, api_key: str | None, *, system: str
     try:
         data = model_post_json(endpoint=profile.base_url, path=path, payload=payload,
                                api_key=api_key, protocol=str(profile.protocol),
-                               timeout_seconds=float(profile.timeout_seconds),
+                               timeout_seconds=float(parameters.timeout_seconds or 180),
                                allow_private=bool(profile.allow_private_network),
                                cancelled=cancelled)
     except ContentAccessError as exc:
         raise ModelProviderError(str(exc)) from None
-    text: Any = None
-    if profile.protocol == "anthropic_compatible":
-        content = data.get("content")
-        if isinstance(content, list):
-            text = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-    else:
-        choices = data.get("choices")
-        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-            message = choices[0].get("message")
-            if isinstance(message, dict):
-                text = message.get("content")
-    if not isinstance(text, str) or not text or len(text) > 100_000:
-        raise ModelProviderError("invalid_model_response")
-    return text
+    return _profile_response_text(data, str(profile.protocol))
 
 
 def test_model_connection(profile: Any, api_key: str | None,
                            *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
-    """One minimal real request; the receipt has no raw provider diagnostics."""
+    """Check a real nonempty model response, not analysis or citation quality.
+
+    The receipt contains neither generated text nor raw provider diagnostics.
+    """
     from .model_http import model_post_json
     from .network import ContentAccessError
 
@@ -269,7 +318,9 @@ def test_model_connection(profile: Any, api_key: str | None,
             allow_private=bool(profile.allow_private_network), cancelled=cancelled)
     except ContentAccessError as exc:
         return {"status": "failed", "detail": str(exc), "elapsed_seconds": time.monotonic() - started}
-    if not isinstance(data, dict):
+    try:
+        _profile_response_text(data, str(profile.protocol))
+    except ModelProviderError:
         return {"status": "failed", "detail": "invalid_model_response",
                 "elapsed_seconds": time.monotonic() - started}
     return {"status": "success", "elapsed_seconds": time.monotonic() - started}
@@ -279,6 +330,7 @@ def extract_text(prompt: str, settings: Settings, *, system: str,
                  client: Any | None = None,
                  cancelled: Callable[[], bool] | None = None,
                  profile: Any | None = None, api_key: str | None = None) -> str:
+    parameters = generation_parameters(settings, profile, client_supplied=client is not None)
     if profile is not None:
         if cancelled and cancelled():
             raise ModelCancelled("model_cancelled")
@@ -292,7 +344,8 @@ def extract_text(prompt: str, settings: Settings, *, system: str,
         if settings.anthropic_api_key is None:
             raise ModelProviderError("model_credentials_unavailable")
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value(),
-                                     timeout=min(settings.http_timeout_seconds, 60), max_retries=0)
-    response = client.messages.create(model=settings.anthropic_model, max_tokens=6000,
+                                     timeout=parameters.timeout_seconds, max_retries=0)
+    assert parameters.max_output_tokens is not None
+    response = client.messages.create(model=settings.anthropic_model, max_tokens=parameters.max_output_tokens,
                                       system=system, messages=[{"role": "user", "content": prompt}])
     return "".join(getattr(part, "text", "") for part in getattr(response, "content", []))

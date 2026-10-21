@@ -318,3 +318,142 @@ def test_ipc_model_commands_roundtrip(tmp_path):
     assert execute(service, {"command": "model_delete", "id": identity})["result"]["deleted"] is True
     with pytest.raises(ValueError):
         execute(service, {"command": "model_delete", "id": identity})
+
+
+def _service_profile(service):
+    return service.save_model_profile({"profile": {
+        "name": "original", "protocol": "openai_compatible",
+        "base_url": "https://relay.example.com/v1", "model": "test",
+        "timeout_seconds": 20, "enabled": True}, "api_key": "fixture-key-original"})
+
+
+@pytest.mark.parametrize("operation", ["save", "delete", "activate"])
+@pytest.mark.parametrize("owner", ["research", "digest"])
+def test_model_mutations_reject_busy_lease_before_credentials_change(tmp_path, monkeypatch, operation, owner):
+    from research.locking import ResearchLease
+
+    store_class, state = _key_store_factory()
+    monkeypatch.setattr("research.model_key_store.ModelKeyStore", store_class)
+    service = ResearchService(tmp_path / "state.db")
+    saved = _service_profile(service)
+    service.activate_model_profile(saved["id"])
+    if owner == "research":
+        class RunningThread:
+            def is_alive(self):
+                return True
+        service._thread = RunningThread()
+    with ResearchLease(service.path):
+        with pytest.raises(ValueError, match="running|stop monitoring"):
+            if operation == "save":
+                service.save_model_profile({"profile": {key: value for key, value in saved.items()
+                    if key != "updated_at"}, "api_key": "fixture-key-replacement"})
+            elif operation == "delete":
+                service.delete_model_profile(saved["id"])
+            else:
+                service.activate_model_profile(None)
+    assert state["saved"] == {saved["id"]: "fixture-key-original"}
+    assert state["deleted"] == []
+    with ResearchStore(service.path) as store:
+        assert store.get_model_profile(saved["id"]).name == "original"
+        assert store.load_settings()["model_profile_id"] == saved["id"]
+    service._thread = None
+    service.delete_model_profile(saved["id"])
+    assert service.list_model_profiles() == []
+
+
+def test_profile_save_restores_prior_key_when_database_write_fails(tmp_path, monkeypatch):
+    store_class, state = _key_store_factory()
+    monkeypatch.setattr("research.model_key_store.ModelKeyStore", store_class)
+    service = ResearchService(tmp_path / "state.db")
+    saved = _service_profile(service)
+    def fail_save(*args, **kwargs):
+        raise OSError("database unavailable")
+    monkeypatch.setattr(ResearchStore, "save_model_profile", fail_save)
+    with pytest.raises(OSError, match="database unavailable"):
+        service.save_model_profile({"profile": {key: value for key, value in saved.items()
+            if key != "updated_at"}, "api_key": "fixture-key-replacement"})
+    assert state["saved"] == {saved["id"]: "fixture-key-original"}
+    with ResearchStore(service.path) as store:
+        assert store.get_model_profile(saved["id"]).key_updated_at == saved["key_updated_at"]
+
+
+def test_profile_capacity_rejected_before_new_key_is_written(tmp_path, monkeypatch):
+    store_class, state = _key_store_factory()
+    monkeypatch.setattr("research.model_key_store.ModelKeyStore", store_class)
+    service = ResearchService(tmp_path / "state.db")
+    with ResearchStore(service.path) as store:
+        for index in range(20):
+            store.save_model_profile(_profile(name=f"profile-{index}"))
+    with pytest.raises(ValueError, match="at most 20"):
+        _service_profile(service)
+    assert state == {"saved": {}, "deleted": []}
+
+
+def test_profile_delete_restores_profile_and_activation_when_key_cleanup_fails(tmp_path, monkeypatch):
+    store_class, state = _key_store_factory()
+    monkeypatch.setattr("research.model_key_store.ModelKeyStore", store_class)
+    service = ResearchService(tmp_path / "state.db")
+    saved = _service_profile(service)
+    service.activate_model_profile(saved["id"])
+    def fail_delete(self, identity):
+        state["saved"].pop(identity, None)
+        raise OSError("credential store unavailable")
+    monkeypatch.setattr(store_class, "delete", fail_delete)
+    with pytest.raises(OSError, match="credential store unavailable"):
+        service.delete_model_profile(saved["id"])
+    assert state["saved"][saved["id"]] == "fixture-key-original"
+    with ResearchStore(service.path) as store:
+        assert store.get_model_profile(saved["id"]) is not None
+        assert store.load_settings()["model_profile_id"] == saved["id"]
+
+
+@pytest.mark.parametrize("protocol,payload", [
+    ("openai_compatible", {}),
+    ("openai_compatible", {"error": {"message": "secret-provider-diagnostic"}}),
+    ("openai_compatible", {"choices": []}),
+    ("openai_compatible", {"choices": [{"message": {"content": None}}]}),
+    ("openai_compatible", {"choices": [{"message": {"content": "  \n"}}]}),
+    ("openai_compatible", {"choices": [{"message": {"content": 42}}]}),
+    ("openai_compatible", {"choices": [{"message": {"content": "x" * 100001}}]}),
+    ("openai_compatible", {"content": [{"type": "text", "text": "ok"}]}),
+    ("anthropic_compatible", {}),
+    ("anthropic_compatible", {"content": []}),
+    ("anthropic_compatible", {"content": [{"type": "text", "text": None}]}),
+    ("anthropic_compatible", {"content": [{"type": "text", "text": 42}]}),
+    ("anthropic_compatible", {"content": [{"type": "text", "text": "  \n"}]}),
+    ("anthropic_compatible", {"content": [{"type": "text", "text": "x" * 100001}]}),
+    ("anthropic_compatible", {"content": [{"type": "tool_use", "id": "tool-1", "input": {}}]}),
+    ("anthropic_compatible", {"choices": [{"message": {"content": "ok"}}]}),
+])
+def test_connection_and_analysis_reject_the_same_invalid_response(monkeypatch, protocol, payload):
+    from config import Settings
+
+    monkeypatch.setattr(model_http, "model_post_json", lambda **kwargs: payload)
+    profile = _profile(protocol=protocol)
+    receipt = connection_test(profile, "secret-test-key")
+    assert receipt["status"] == "failed"
+    assert receipt["detail"] == "invalid_model_response"
+    assert "secret" not in json.dumps(receipt)
+    with pytest.raises(ModelProviderError, match="^invalid_model_response$"):
+        extract_text("material", Settings(_env_file=None), system="extract", profile=profile, api_key=None)
+
+
+@pytest.mark.parametrize("protocol,payload,expected", [
+    ("openai_compatible", {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}, "ok"),
+    ("anthropic_compatible", {"content": [{"type": "text", "text": "o"}, {"type": "text", "text": "k"}]}, "ok"),
+])
+def test_connection_and_analysis_share_text_parser_without_exposing_output(monkeypatch, protocol, payload, expected):
+    from config import Settings
+
+    requests = []
+    def post(**kwargs):
+        requests.append(kwargs)
+        return payload
+    monkeypatch.setattr(model_http, "model_post_json", post)
+    profile = _profile(protocol=protocol, timeout_seconds=90)
+    receipt = connection_test(profile, "secret-test-key")
+    assert receipt["status"] == "success"
+    assert "content" not in receipt and "text" not in receipt
+    assert requests[0]["payload"]["max_tokens"] == 16 and requests[0]["timeout_seconds"] == 30
+    assert extract_text("material", Settings(_env_file=None), system="extract", profile=profile, api_key=None) == expected
+    assert len(requests) == 2

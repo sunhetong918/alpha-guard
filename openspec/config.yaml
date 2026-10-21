@@ -2,27 +2,8 @@ schema: spec-driven
 
 context: |
   Language: zh-CN
-  All artifacts must be written in zh-CN.
   Keep OpenSpec structural headings and SHALL/MUST keywords in English.
-
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
-
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  本项目只维护一个 OpenSpec 文档：openspec/specs/alpha-guard/spec.md。
+  该文件只包含尚未完成的工作、具体设计、源码依据与验收条件。
+  满足验收条件后删除对应条目；历史通过 Git 查询，使用说明留在 docs。
+  新需求直接更新该文件，不另建 proposal、design、tasks、变更目录或归档文档。

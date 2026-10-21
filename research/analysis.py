@@ -11,6 +11,7 @@ import json
 import math
 import re
 import threading
+from copy import deepcopy
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -20,13 +21,15 @@ from pydantic import Field, ValidationError
 
 from config import Settings, get_settings
 from .models import (
-    Citation, EvidenceRecord, ExtractedClaim, ExtractedThesis, ExtractionResult, Horizon,
-    ResearchAction, ResearchClaim, ResearchInstrument, ResearchReport, ResearchStatus,
+    Citation, EvidenceRecord, ExtractedClaim, ExtractedContent, ExtractedThesis, ExtractionResult,
+    GenerationContext, Horizon, ModelProfile, ResearchAction, ResearchClaim,
+    ResearchInstrument, ResearchReport, ResearchStatus,
     aware, digest, parse_time,
 )
 from .store import ResearchStore
 
-ANALYZER_VERSION = "evidence-research-v4"
+ANALYZER_VERSION = "evidence-research-v5"
+PROMPT_TEMPLATE_VERSION = "traceable-extraction-v1"
 _VALIDITY = {"short": timedelta(hours=1), "swing": timedelta(days=3), "long": timedelta(days=30)}
 _NEWS_AGE = {"short": timedelta(hours=6), "swing": timedelta(days=14), "long": timedelta(days=180)}
 _QUOTE_AGE = {"short": timedelta(minutes=15), "swing": timedelta(days=3), "long": timedelta(days=7)}
@@ -78,7 +81,7 @@ class _Cancelled(Exception):
     pass
 
 
-class _ExtractionChunk(ExtractionResult):
+class _ExtractionChunk(ExtractedContent):
     claims: list[ExtractedClaim] = Field(default_factory=list, max_length=40)
 
 
@@ -97,6 +100,7 @@ def _security_keys(result: ExtractionResult, instruments: Sequence[ResearchInstr
     return ExtractionResult(
         claims=[claim.model_copy(update={"ticker": resolve(claim.ticker)}) for claim in result.claims],
         theses=[thesis.model_copy(update={"ticker": resolve(thesis.ticker)}) for thesis in result.theses],
+        generation_context=result.generation_context,
     )
 
 
@@ -131,6 +135,9 @@ def _chunks(evidence: EvidenceRecord) -> list[tuple[EvidenceRecord, int]]:
 
 
 def _merge_chunks(parts: Sequence[tuple[ExtractionResult, int]]) -> ExtractionResult:
+    contexts = [part.generation_context for part, _ in parts]
+    if any(context != contexts[0] for context in contexts[1:]):
+        raise ValueError("cannot merge chunks generated with different configurations")
     claims: list[ExtractedClaim] = []
     grouped: dict[tuple[str, str], list[ExtractedThesis]] = {}
     for part, segment_offset in parts:
@@ -152,7 +159,8 @@ def _merge_chunks(parts: Sequence[tuple[ExtractionResult, int]]) -> ExtractionRe
         for field in ("claim_indices", "catalysts", "counter_evidence", "conditions", "invalidation", "verification_steps"):
             payload[field] = list(dict.fromkeys(value for fragment in fragments for value in getattr(fragment, field)))
         theses.append(ExtractedThesis.model_validate(payload))
-    return ExtractionResult(claims=claims, theses=theses)
+    return ExtractionResult(claims=claims, theses=theses,
+                            generation_context=contexts[0] if contexts else None)
 
 
 def _number(value: Any) -> float | None:
@@ -180,11 +188,65 @@ def _context(raw: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def build_generation_context(settings: Settings,
+                             instruments: Sequence[ResearchInstrument | Mapping[str, Any]],
+                             horizons: Sequence[Horizon], *, profile: ModelProfile | None = None,
+                             client_supplied: bool = False) -> GenerationContext:
+    """Capture nonsecret behavior, without keys, persistence, or provider requests.
+
+    Profile names, credential rotation and update timestamps are deliberately
+    absent. Built-in clients own their endpoint routing; an unknown endpoint is
+    None, never a guessed URL. Injected clients are explicitly distinguished.
+    """
+    from .model_provider import generation_parameters
+
+    securities = tuple(sorted((
+        i.model_copy(deep=True) if isinstance(i, ResearchInstrument) else ResearchInstrument.model_validate(i)
+        for i in instruments), key=lambda i: i.key))
+    periods = tuple(sorted(set(horizons)))
+    if len(securities) > 100 or len({i.key for i in securities}) != len(securities):
+        raise ValueError("research instruments must be unique and bounded")
+    if not periods or not set(periods).issubset(_VALIDITY):
+        raise ValueError("choose supported research horizons")
+    parameters = generation_parameters(settings, profile, client_supplied=client_supplied)
+    provider = (profile.protocol if profile is not None else "injected_client" if client_supplied else
+                getattr(settings, "research_model_provider", "anthropic"))
+    model = (profile.model if profile is not None else
+             getattr(settings, "research_codex_model", "gpt-5.5") if provider == "codex_cli" else
+             getattr(settings, "anthropic_model", "claude-sonnet-4-6"))
+    endpoint_fingerprint = digest(profile.base_url) if profile is not None else None
+    profile_version = (digest({"provider": provider, "model": model,
+        "endpoint_fingerprint": endpoint_fingerprint, "parameters": parameters.model_dump(),
+        "allow_private_network": profile.allow_private_network}) if profile is not None else None)
+    payload = {"schema_version": 1, "provider": provider, "model": model,
+        "profile_id": profile.id if profile is not None else None,
+        "profile_version": profile_version, "endpoint_fingerprint": endpoint_fingerprint,
+        "analyzer_version": ANALYZER_VERSION, "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+        "horizons": periods, "instruments": [i.model_dump(mode="json") for i in securities],
+        "parameters": parameters.model_dump()}
+    return GenerationContext.model_validate({**payload, "config_version": digest(payload)})
+
+
+def generation_config_signature(settings: Settings,
+                                 instruments: Sequence[ResearchInstrument | Mapping[str, Any]],
+                                 horizons: Sequence[Horizon], *, profile: ModelProfile | None = None,
+                                 client_supplied: bool = False) -> str:
+    """Stable compatibility signature for explicit resume and extraction caching."""
+    return build_generation_context(settings, instruments, horizons, profile=profile,
+                                    client_supplied=client_supplied).config_version
+
+
 def extraction_cache_key(evidence: EvidenceRecord, instruments: Sequence[ResearchInstrument],
-                         horizons: Sequence[Horizon], model: str) -> str:
+                         horizons: Sequence[Horizon], model: str, *, config_version: str | None = None) -> str:
     return digest([ANALYZER_VERSION, evidence.content_hash, model,
                    sorted([i.model_dump(mode="json") for i in instruments], key=lambda i: (i["market"], i["ticker"])),
-                   sorted(horizons)])
+                   sorted(horizons), config_version])
+
+
+def _cache_matches(result: ExtractionResult | None, context: GenerationContext) -> bool:
+    # Legacy cache entries cannot prove their configuration and are regenerated.
+    return (result is not None and result.generation_context is not None
+            and result.generation_context.config_version == context.config_version)
 
 
 def _numbers_supported(text: str, quote: str) -> bool:
@@ -266,7 +328,8 @@ def _extract(evidence: EvidenceRecord, instruments: Sequence[ResearchInstrument]
              horizons: Sequence[Horizon], settings: Settings, client: Any | None,
              before_call: Callable[[], None],
              cancelled: Callable[[], bool] | None = None, *,
-             model_profile: Any | None = None, api_key: str | None = None) -> ExtractionResult:
+             model_profile: Any | None = None, api_key: str | None = None,
+             generation_context: GenerationContext) -> ExtractionResult:
     from .model_provider import extract_text
     if len(evidence.content_text) > _MAX_INPUT:
         raise ValueError("content requires bounded segmentation before analysis")
@@ -313,7 +376,9 @@ def _extract(evidence: EvidenceRecord, instruments: Sequence[ResearchInstrument]
     )
     if not text or len(text) > 100_000:
         raise ValueError("unbounded or empty extraction response")
-    result = _security_keys(_ExtractionChunk.model_validate_json(text), instruments)
+    content = _ExtractionChunk.model_validate_json(text)
+    result = _security_keys(ExtractionResult(**content.model_dump(),
+                                            generation_context=generation_context), instruments)
     _validate_extraction(result, evidence, instruments, horizons)
     return result
 
@@ -405,7 +470,8 @@ def analyze_evidence(evidence: EvidenceRecord,
                      ai_enabled: bool = True,
                      cancelled: Callable[[], bool] | None = None,
                      budget: AnalysisBudget | None = None,
-                     max_calls: int | None = None) -> list[ResearchReport]:
+                     max_calls: int | None = None,
+                     persist_reports: bool = True) -> list[ResearchReport]:
     timestamp = aware(now or datetime.now(UTC))
     securities = [i if isinstance(i, ResearchInstrument) else ResearchInstrument.model_validate(i)
                   for i in instruments]
@@ -416,11 +482,16 @@ def analyze_evidence(evidence: EvidenceRecord,
     profiles = list(dict.fromkeys(horizons))
     if not securities or (cancelled and cancelled()):
         return []
-    runtime = settings or get_settings()
+    runtime = deepcopy(settings if settings is not None else get_settings())
+    frozen_market = {key: _context(value) for key, value in (market_contexts or {}).items()}
     from .model_provider import ModelCancelled, model_capabilities, model_identity
     from .model_profiles import active_model_profile
 
     profile = active_model_profile(store) if store is not None else None
+    if profile is not None:
+        profile = profile.model_copy(deep=True)
+    frozen_generation = build_generation_context(runtime, securities, profiles, profile=profile,
+                                                 client_supplied=client is not None)
     api_key: str | None = None
     if profile is not None:
         from .model_key_store import ModelKeyStore
@@ -429,8 +500,10 @@ def analyze_evidence(evidence: EvidenceRecord,
             api_key = ModelKeyStore().load(profile.id)
         except Exception:  # noqa: BLE001 - key store boundary; analysis reports failure
             api_key = None
-    model = model_identity(runtime, profile)
-    cache_key = extraction_cache_key(evidence, securities, profiles, model)
+    model = (f"injected_client:{frozen_generation.model}" if client is not None and profile is None
+             else model_identity(runtime, profile))
+    cache_key = extraction_cache_key(evidence, securities, profiles, model,
+                                     config_version=frozen_generation.config_version)
     result: ExtractionResult | None = None
     extraction_status = "waiting_content"
     if store:
@@ -452,6 +525,8 @@ def analyze_evidence(evidence: EvidenceRecord,
         else:
             try:
                 result = store.get_cached_extraction(cache_key) if store else None
+                if not _cache_matches(result, frozen_generation):
+                    result = None
                 if result is not None:
                     result = _security_keys(result, securities)
                     _validate_extraction(result, evidence, securities, profiles)
@@ -461,8 +536,11 @@ def analyze_evidence(evidence: EvidenceRecord,
                     for chunk, offset in _chunks(evidence):
                         if cancelled and cancelled():
                             raise _Cancelled()
-                        chunk_key = extraction_cache_key(chunk, securities, profiles, model)
+                        chunk_key = extraction_cache_key(chunk, securities, profiles, model,
+                                                         config_version=frozen_generation.config_version)
                         part = store.get_cached_extraction(chunk_key) if store else None
+                        if not _cache_matches(part, frozen_generation):
+                            part = None
                         if part is not None:
                             part = _security_keys(part, securities)
                             _validate_extraction(part, chunk, securities, profiles)
@@ -471,7 +549,8 @@ def analyze_evidence(evidence: EvidenceRecord,
                                 extraction_status = "unavailable"
                                 break
                             part = _extract(chunk, securities, profiles, runtime, client, before_call, cancelled,
-                                            model_profile=profile, api_key=api_key)
+                                            model_profile=profile, api_key=api_key,
+                                            generation_context=frozen_generation)
                             if cancelled and cancelled():
                                 raise _Cancelled()
                             if store:
@@ -501,7 +580,7 @@ def analyze_evidence(evidence: EvidenceRecord,
     theses = {(t.ticker, t.horizon): t for t in result.theses} if result else {}
     reports: list[ResearchReport] = []
     for instrument in securities:
-        context = _context((market_contexts or {}).get(instrument.key, {}))
+        context = frozen_market.get(instrument.key, {})
         for horizon in profiles:
             thesis = theses.get((instrument.key, horizon))
             claims = _claims(result, thesis, evidence) if result and thesis else []
@@ -538,7 +617,8 @@ def analyze_evidence(evidence: EvidenceRecord,
                         summary = "维持观察并复核已有持仓，当前证据未给出明确方向。"
             report_context = {key: value for key, value in context.items()
                               if key not in {"observed_at", "fundamentals_observed_at"}}
-            report_key = digest([ANALYZER_VERSION, model, evidence.source_cluster, instrument.model_dump(), horizon,
+            report_key = digest([ANALYZER_VERSION, model, frozen_generation.config_version,
+                                 evidence.source_cluster, instrument.model_dump(), horizon,
                                  report_context, "complete" if result else extraction_status])
             prior = store.get_report(report_key, now=timestamp) if store else None
             if prior:
@@ -577,8 +657,9 @@ def analyze_evidence(evidence: EvidenceRecord,
                 created_at=timestamp, valid_until=valid_until,
                 reference_price=price if price is not None and price > 0 else None,
                 market_context=context, analyzer_version=ANALYZER_VERSION,
+                generation_context=result.generation_context if result else frozen_generation if local_calls else None,
             )
-            if store:
+            if store and persist_reports:
                 report = store.save_report(report)
             reports.append(report)
     return reports

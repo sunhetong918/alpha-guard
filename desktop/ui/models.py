@@ -685,15 +685,20 @@ class ActionReceipt:
     accepted: bool
     message: str
     request_id: str
+    result: dict[str, Any] | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> ActionReceipt:
         data = _mapping(payload, "action")
+        result = data.get("result")
+        if result is not None and not isinstance(result, dict):
+            raise PayloadError("action.result:object")
         return cls(
             action=_string(data.get("action"), "action.action"),
             accepted=_boolean(data.get("accepted"), "action.accepted"),
             message=_string(data.get("message"), "action.message"),
             request_id=_string(data.get("request_id"), "action.request_id"),
+            result=result,
         )
 
 

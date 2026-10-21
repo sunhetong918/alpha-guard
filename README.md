@@ -122,7 +122,7 @@ Futu 的快照、权限与订阅额度以官方[市场快照](https://openapi.fu
 | `screen` | 全市场研究筛选：HK 按市值取样 / US 内置大盘池 → 评分排序 | 是 | 否 |
 | `scan` | 单次扫描已启用的港股/美股标的；默认仅在终端预览 | 有启用标的时 | 否；需 `--notify` + 环境开关 |
 | `news` | 单次扫描已启用的新闻源；默认仅在终端预览 | 有启用来源时 | 否；需 `--notify` + 环境开关 |
-| `research` | 按需扫描/订阅/导入/多周期研究；status、show、history、replay 均离线 | 仅显式 scan/watch/transcribe | 否 |
+| `research` | 按需扫描/订阅/导入/多周期研究；status、show、history、runs、run-show、replay 均离线 | 显式 scan/watch/transcribe/resume、model-test、digest-run 或摘要计划 | 仅开启摘要通知且通道已配置时 |
 | `run` | 启动交易日历感知的长期调度器；默认预览模式 | 有启用任务时 | 否；需 `--notify` + 环境开关 |
 | `status --json` | 离线读取 SQLite，输出 schedule / silence / providers / delivery 的 Cockpit 收据 | 否 | 否 |
 | `repair-state --scope ... --confirm` | 先做 SQLite 备份，再显式隔离指定 scope 的损坏账本 | 否 | 否 |
@@ -368,7 +368,11 @@ uv run alpha-guard status --json
 
 桌面“投资研究”支持主动扫描/跟踪、US/HK/CN 市场选择、短线/波段/长期周期、作者订阅、正文与字幕导入和证据报告。默认不开启后台新闻扫描，读取页面不会联网；每条建议保留引用与有效期。平台完整度和配置限制见[使用说明](docs/RESEARCH.md)。
 
-研究页还支持**自定义模型 profile**（用自己的 API key 接入 OpenAI/Anthropic 兼容端点，密钥存钥匙串）与**每日摘要**（默认关闭的定时计划，按自选股票与主题关键词聚合已配置来源，可选 AI 汇总与推送）。
+研究页还支持**自定义模型 profile**（用自己的 API key 接入 OpenAI/Anthropic 兼容端点，密钥存钥匙串）与**每日摘要**（默认关闭的定时计划，按自选股票与主题关键词聚合已配置来源，可选 AI 原文选读与推送）。
+
+侧栏“自选股票”可添加证券、编辑六类监控规则并预览确认；研究页提供人工核验状态、备注、价格样本复盘与事件日历。财报/公告/分红/拆股支持录入或导入；历史分红/拆股自动接口本次实测返回访问受限，暂不能声称自动来源可用。使用入口与覆盖边界见[研究说明](docs/RESEARCH.md#自选核验与事件)，未完成工作与竞品源码借鉴统一见 [OpenSpec](openspec/specs/alpha-guard/spec.md)。
+
+自选可进入单证券概览，串联报告、核验和事件；报告保留生成时的模型配置。研究页“任务与续跑”可查看材料进度并显式继续兼容的中断批次，保留已完成结果与累计预算。每日摘要支持选择 Telegram、WhatsApp 或双渠道，分别记录结果；WhatsApp 当前仅发送静态模板通知。
 
 ## SQLite 去重与审计
 
@@ -431,7 +435,7 @@ uv run mypy analysis data desktop guardian news notifier reliability signals sta
 - [桌面 App、Guardian、自启与移动提醒](docs/DESKTOP.md)
 - [目标架构](docs/ARCHITECTURE.md)
 - [可靠性契约与事故 Runbook](docs/RELIABILITY.md)
-- [演进路线](docs/ROADMAP.md)
+- [OpenSpec：唯一未完成清单](openspec/specs/alpha-guard/spec.md)
 - [安全策略与漏洞报告](SECURITY.md)
 
 发现疑似密钥泄漏、通知注入、越权联网、订单执行路径或其他安全问题时，请按[安全策略](SECURITY.md)私下报告，不要在公开 issue 中粘贴真实凭据。

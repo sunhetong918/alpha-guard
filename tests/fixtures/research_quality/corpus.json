@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "status": "draft_pending_human_review",
+  "budget": {
+    "cases_per_round": 12,
+    "model_calls_default": 0,
+    "paid_model_calls_max_per_round": 2,
+    "paid_cost_usd_max_per_round": "1.00",
+    "enforcement": "此材料包不调用模型；真实运行前须核实模型单价并设硬 token 上限，无法证明费用上限时不得运行付费轮次。"
+  },
+  "sources": [
+    {
+      "id": "apple-fy25q4",
+      "kind": "official_excerpt",
+      "url": "https://www.apple.com/newsroom/2025/10/apple-reports-fourth-quarter-results/",
+      "retrieved_on": "2026-10-16",
+      "publisher": "Apple",
+      "publication_date": "2025-10-30",
+      "period_end": "2025-09-27",
+      "security": "US:AAPL",
+      "excerpt": "The Company posted quarterly revenue of $102.5 billion, up 8 percent year over year.",
+      "notes": "官方稿有 Tim Cook 和 Kevan Parekh 的分别署名发言；公司稿作者不能直接视为其中某位发言人。",
+      "excerpt_sha256": "243f8a9bf3e4fa8e8cb159ad098954bdae33d1c627de703d97142a3ea2121058"
+    },
+    {
+      "id": "microsoft-fy25q4",
+      "kind": "official_excerpt",
+      "url": "https://www.microsoft.com/en-us/Investor/earnings/FY-2025-Q4/press-release-webcast",
+      "retrieved_on": "2026-10-16",
+      "publisher": "Microsoft",
+      "publication_date": "2025-07-30",
+      "period_end": "2025-06-30",
+      "security": "US:MSFT",
+      "excerpt": "Revenue was $76.4 billion and increased 18% (up 17% in constant currency)",
+      "notes": "18% 为报告口径增长，17% 为固定汇率口径；两者不能互换。",
+      "excerpt_sha256": "6876a7ceb0ff42140509696d27489b465c55052cccbe6fa218a9ef874538c56e"
+    },
+    {
+      "id": "synthetic-transcript",
+      "kind": "synthetic",
+      "url": null,
+      "excerpt": "[00:01-00:04] 主持人甲：这里讨论的是自由现金流，不是自由现金牛。\n[00:05-00:08] 嘉宾乙：我认为需求可能改善，但没有足够证据确认。",
+      "notes": "人工构造文本，无真实音频。只测字幕证据和作者归属，不可算转写器实际识别验收。",
+      "excerpt_sha256": "847eee8ec1fed30c6b8fcfa9bfb3d09f4887506ff262bd294d0e969bd0d2e034"
+    },
+    {
+      "id": "synthetic-ambiguous",
+      "kind": "synthetic",
+      "url": null,
+      "excerpt": "文中仅写 ABC，公司名称、交易所、币种和原始发布日期均未给出。",
+      "notes": "未知信息不得按抓取时间或同名代码推断。",
+      "excerpt_sha256": "9f89dc2a3249ab915fae0c18fdc1db0d021f8d5e23f75479eb95808fae60e234"
+    }
+  ],
+  "cases": [
+    {
+      "id": "amount-correct",
+      "source_id": "apple-fy25q4",
+      "category": "金额",
+      "claim": "季度营收为 1025 亿美元。",
+      "proposed_label": "supported",
+      "review_hint": "核对 billion 与亿换算及美元单位。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "amount-wrong-currency",
+      "source_id": "apple-fy25q4",
+      "category": "金额",
+      "claim": "季度营收为 1025 亿元人民币。",
+      "proposed_label": "unsupported",
+      "review_hint": "原文币种为美元。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "amount-wrong-scale",
+      "source_id": "apple-fy25q4",
+      "category": "金额",
+      "claim": "季度营收为 102.5 亿美元。",
+      "proposed_label": "unsupported",
+      "review_hint": "数量级少十倍。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "date-period-vs-publication",
+      "source_id": "apple-fy25q4",
+      "category": "日期",
+      "claim": "该稿发布于 2025-09-27。",
+      "proposed_label": "unsupported",
+      "review_hint": "9 月 27 日是财季结束日，发稿为 10 月 30 日。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "author-attribution",
+      "source_id": "apple-fy25q4",
+      "category": "多作者",
+      "claim": "整篇公司稿的所有说法都出自 Tim Cook。",
+      "proposed_label": "unsupported",
+      "review_hint": "发言人、公司发布主体、正文作者应分开核对。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "entity-cross-company",
+      "source_id": "microsoft-fy25q4",
+      "category": "证券实体",
+      "claim": "该条收入数据属于 US:AAPL。",
+      "proposed_label": "unsupported",
+      "review_hint": "材料主体为 Microsoft / US:MSFT。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "constant-currency",
+      "source_id": "microsoft-fy25q4",
+      "category": "金融术语",
+      "claim": "报告口径营收增长 18%，固定汇率口径增长 17%。",
+      "proposed_label": "supported",
+      "review_hint": "两个口径分别保留。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "quote-fabricated",
+      "source_id": "microsoft-fy25q4",
+      "category": "引用",
+      "claim": "逐字引用：Revenue was $90 billion。",
+      "proposed_label": "unsupported",
+      "review_hint": "引用必须与保存原文逐字相符。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "transcript-term",
+      "source_id": "synthetic-transcript",
+      "category": "术语转写",
+      "claim": "主持人讨论的术语是自由现金牛。",
+      "proposed_label": "unsupported",
+      "review_hint": "定位 00:01-00:04，原文本纠正为自由现金流；不是实际 ASR 性能证明。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "speaker-and-opinion",
+      "source_id": "synthetic-transcript",
+      "category": "多作者",
+      "claim": "嘉宾乙表达需求可能改善的观点。",
+      "proposed_label": "supported",
+      "review_hint": "定位 00:05-00:08；保留观点性质与不确定性。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "ambiguous-entity",
+      "source_id": "synthetic-ambiguous",
+      "category": "证券实体",
+      "claim": "ABC 是某一确定的美股证券。",
+      "proposed_label": "undetermined",
+      "review_hint": "缺交易所及完整主体。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "missing-date",
+      "source_id": "synthetic-ambiguous",
+      "category": "日期",
+      "claim": "可以用今天作为原始发布日期。",
+      "proposed_label": "unsupported",
+      "review_hint": "采集时间不能替代未知发布日期。",
+      "human_label": null,
+      "reviewer": null,
+      "reviewed_at": null
+    }
+  ]
+}

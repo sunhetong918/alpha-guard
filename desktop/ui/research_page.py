@@ -8,9 +8,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
-from PySide6.QtCore import QTime, Qt, QTimer, QUrl
+from PySide6.QtCore import QTime, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .client import GuardianClient
+from .generation import generation_html
 from .models import ActionReceipt, DashboardSnapshot
 from .widgets import PageHeading
 
@@ -58,10 +59,14 @@ DIGEST_AI_STATUSES = {
     "disabled": "未开启",
 }
 DIGEST_DELIVERY_STATUSES = {
-    "sent": "已发送",
-    "already_sent": "本轮已发送过",
+    "sent": "服务已接受（旧记录），接收待确认",
+    "already_sent": "服务此前已接受（旧记录），接收待确认",
+    "accepted": "服务已接受，接收待确认",
+    "already_accepted": "服务此前已接受，接收待确认",
+    "partial": "部分通道未接受，请查看各通道结果",
     "not_configured": "未配置通知通道",
     "failed": "发送失败",
+    "cancelled": "已取消后续投递",
     "skipped": "未开启投递",
 }
 STATUSES = {
@@ -268,6 +273,9 @@ def _table(columns: list[str]) -> QTableWidget:
 class ResearchPage(QWidget):
     """The form drafts are independent of read-only status refreshes."""
 
+    review_requested = Signal(str)
+    instrument_requested = Signal(str)
+
     def __init__(self, client: GuardianClient, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("researchPage")
@@ -294,6 +302,13 @@ class ResearchPage(QWidget):
         self._previous_buttons: dict[str, QPushButton] = {}
         self._next_buttons: dict[str, QPushButton] = {}
         self._reload_buttons: dict[str, QPushButton] = {}
+        self._digest_history_offset = 0
+        self._digest_history_requested: int | None = None
+        self._digest_history_page: dict[str, Any] | None = None
+        self._digest_history_ids: list[str] = []
+        self._digest_display: dict[str, Any] = {}
+        self._digest_detail_requested: tuple[str, int] | None = None
+        self._digest_detail_expected: tuple[str, int] | None = None
         self._runtime_state = "STOPPED"
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
@@ -437,6 +452,16 @@ class ResearchPage(QWidget):
         pager.addWidget(previous)
         pager.addWidget(following)
         pager.addWidget(reload_button)
+        if kind == "report":
+            self.review_report_button = QPushButton("核验与复盘")
+            self.review_report_button.setEnabled(False)
+            self.review_report_button.clicked.connect(
+                lambda: self.review_requested.emit(self._selected.get("report", "")))
+            pager.addWidget(self.review_report_button)
+            self.report_instrument_button = QPushButton("证券概览")
+            self.report_instrument_button.setEnabled(False)
+            self.report_instrument_button.clicked.connect(self._open_report_instrument)
+            pager.addWidget(self.report_instrument_button)
         detail_layout.addLayout(pager)
         detail_layout.addWidget(detail, 1)
         splitter.addWidget(detail_panel)
@@ -680,15 +705,17 @@ class ResearchPage(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.addWidget(_label(
             "用自己的 API key 接入 OpenAI 兼容或 Anthropic 兼容服务；密钥只存本机钥匙串，"
-            "激活一个 profile 后 AI 分析改用它，留空则沿用环境变量提供者。"
+            "可以保存 ZCode 等多个服务并随时激活切换；使用默认模型可切回本机 Codex（默认提供者为 Codex 时）。"
         ))
+        self.model_current = _label("当前使用：尚未读取")
+        layout.addWidget(self.model_current)
         self.model_table = _table(["名称", "协议", "模型", "端点", "密钥", "状态"])
         self.model_table.setMinimumHeight(140)
         self.model_table.itemSelectionChanged.connect(self._show_model_status)
         layout.addWidget(self.model_table, 1)
         form = QFormLayout()
         self.model_name = QLineEdit()
-        self.model_name.setPlaceholderText("例如 公司名-模型名")
+        self.model_name.setPlaceholderText("例如 ZCode-模型名、Codex API-模型名")
         self.model_protocol = QComboBox()
         self.model_protocol.addItem("OpenAI 兼容 /chat/completions", "openai_compatible")
         self.model_protocol.addItem("Anthropic 兼容 /v1/messages", "anthropic_compatible")
@@ -720,7 +747,7 @@ class ResearchPage(QWidget):
         self.model_save_button.setProperty("primary", True)
         self.model_delete_button = QPushButton("删除所选")
         self.model_activate_button = QPushButton("激活所选")
-        self.model_deactivate_button = QPushButton("停用（回退环境变量）")
+        self.model_deactivate_button = QPushButton("使用默认模型")
         self.model_test_button = QPushButton("测试连接")
         self.model_save_button.clicked.connect(self._save_model_profile)
         self.model_delete_button.clicked.connect(self._delete_model_profile)
@@ -756,12 +783,17 @@ class ResearchPage(QWidget):
             "每行一个主题：标签: 关键词1, 关键词2\n例如\n半导体: 芯片, 光刻, 先进制程\n创新药: 临床, FDA"
         )
         self.digest_topics.setMinimumHeight(80)
-        self.digest_ai = QCheckBox("AI 汇总（每轮最多一次模型调用）")
-        self.digest_notify = QCheckBox("推送到已配置的通知通道")
+        self.digest_ai = QCheckBox("AI 原文选读（每轮最多一次模型调用）")
+        self.digest_notify = QCheckBox("生成后发送通知")
+        self.digest_telegram = QCheckBox("Telegram · 摘要正文")
+        self.digest_whatsapp = QCheckBox("WhatsApp · 模板通知")
+        self.digest_telegram.setChecked(True)
+        self.digest_whatsapp.setChecked(True)
         self.digest_max_items = QSpinBox()
         self.digest_max_items.setRange(1, 100)
         self.digest_max_items.setValue(20)
-        for widget in (self.digest_enabled, self.digest_ai, self.digest_notify):
+        for widget in (self.digest_enabled, self.digest_ai, self.digest_notify,
+                       self.digest_telegram, self.digest_whatsapp):
             widget.toggled.connect(self._mark_digest_dirty)
         self.digest_time.timeChanged.connect(self._mark_digest_dirty)
         self.digest_topics.textChanged.connect(self._mark_digest_dirty)
@@ -771,6 +803,12 @@ class ResearchPage(QWidget):
         form.addRow("主题", self.digest_topics)
         form.addRow("", self.digest_ai)
         form.addRow("", self.digest_notify)
+        channels = QHBoxLayout()
+        channels.addWidget(self.digest_telegram)
+        channels.addWidget(self.digest_whatsapp)
+        channels.addStretch(1)
+        form.addRow("接收渠道（可多选）", channels)
+        form.addRow("", _label("渠道需先配置凭据和接收端。WhatsApp 当前只发送已批准模板，摘要正文请在桌面查看。"))
         form.addRow("每组条目上限", self.digest_max_items)
         layout.addLayout(form)
         actions = QHBoxLayout()
@@ -790,8 +828,38 @@ class ResearchPage(QWidget):
         self.digest_history.itemSelectionChanged.connect(self._show_digest_record)
         layout.addWidget(_label("历史摘要（选择一行查看完整内容；离线读取）。"))
         layout.addWidget(self.digest_history)
+        history_controls = QHBoxLayout()
+        self.digest_history_label = _label("正在读取历史摘要…")
+        self.digest_history_previous = QPushButton("上一页")
+        self.digest_history_next = QPushButton("下一页")
+        self.digest_history_refresh = QPushButton("刷新历史")
+        self.digest_history_previous.clicked.connect(
+            lambda: self._request_digest_history(max(0, self._digest_history_offset - 20)))
+        self.digest_history_next.clicked.connect(self._next_digest_history)
+        self.digest_history_refresh.clicked.connect(lambda: self._request_digest_history(0))
+        history_controls.addWidget(self.digest_history_label, 1)
+        for button in (self.digest_history_previous, self.digest_history_next, self.digest_history_refresh):
+            history_controls.addWidget(button)
+        layout.addLayout(history_controls)
+        detail_controls = QHBoxLayout()
+        self.digest_detail_label = _label("选择历史摘要查看完整内容")
+        self.digest_detail_previous = QPushButton("上一组条目")
+        self.digest_detail_next = QPushButton("下一组条目")
+        self.digest_detail_latest = QPushButton("查看最近一份")
+        self.digest_detail_previous.clicked.connect(lambda: self._request_digest_detail(
+            self._selected.get("digest", ""), max(0, int(self._digest_display.get("digest_offset", 0)) - 20)))
+        self.digest_detail_next.clicked.connect(self._next_digest_detail)
+        self.digest_detail_latest.clicked.connect(self._show_latest_digest)
+        self.digest_detail_previous.setEnabled(False)
+        self.digest_detail_next.setEnabled(False)
+        detail_controls.addWidget(self.digest_detail_label, 1)
+        for button in (self.digest_detail_previous, self.digest_detail_next, self.digest_detail_latest):
+            detail_controls.addWidget(button)
+        layout.addLayout(detail_controls)
         self.digest_detail = QTextBrowser()
+        self.digest_detail.setOpenLinks(False)
         self.digest_detail.setOpenExternalLinks(False)
+        self.digest_detail.anchorClicked.connect(self._open_digest_source)
         self.digest_detail.setPlainText("尚无摘要。开启计划或点击“立即生成一次”。")
         layout.addWidget(self.digest_detail, 1)
         panel.setMinimumHeight(520)
@@ -848,8 +916,8 @@ class ResearchPage(QWidget):
                         "exchange": old.get("exchange", ""),
                     }
                 )
-            if len(instruments) > 50:
-                raise ValueError("最多可配置 50 个关注标的。")
+            if len(instruments) > 100:
+                raise ValueError("最多可配置 100 个关注标的。")
             if any(item["market"] not in markets for item in instruments):
                 raise ValueError("关注股票包含未选中的市场，请勾选对应市场。")
             settings = {
@@ -1105,6 +1173,11 @@ class ResearchPage(QWidget):
         self._send("model_test", {"id": profile.get("id")})
 
     def _save_digest_settings(self) -> None:
+        channels = [name for name, checkbox in (("telegram", self.digest_telegram),
+                                                ("whatsapp", self.digest_whatsapp)) if checkbox.isChecked()]
+        if self.digest_notify.isChecked() and not channels:
+            self.message_label.setText("请至少选择一个接收渠道，或关闭生成后发送通知。")
+            return
         topics = []
         for line in self.digest_topics.toPlainText().splitlines():
             line = line.strip()
@@ -1119,11 +1192,15 @@ class ResearchPage(QWidget):
             "topics": topics[:20],
             "ai_summary": self.digest_ai.isChecked(),
             "notify": self.digest_notify.isChecked(),
+            "notify_channels": channels,
             "max_items": self.digest_max_items.value(),
         }
         self._send("digest_save", {"settings": value})
 
     def _run_digest_once(self) -> None:
+        if self._digest_dirty or "digest_save" in self._pending:
+            self.message_label.setText("请先保存摘要设置，确认接收渠道生效后再生成。")
+            return
         self._send("digest_once")
 
     def _populate_models(self) -> None:
@@ -1131,6 +1208,10 @@ class ResearchPage(QWidget):
         if not isinstance(profiles, list):
             profiles = []
         active = (self._snapshot.get("capabilities") or {}).get("model_profile_active") or {}
+        provider = str((self._snapshot.get("capabilities") or {}).get("model_provider") or "尚未确认")
+        self.model_deactivate_button.setToolTip("停用 API 配置，使用本机默认提供者；不会删除 API Key。")
+        current = f"{active.get('name')} · {active.get('model')}" if active else {"codex_cli": "本机 Codex", "claude_cli": "本机 Claude"}.get(provider, provider)
+        self.model_current.setText(f"当前使用：{current}；切换仅影响后续生成，已有报告保留原模型记录。")
         self.model_table.setRowCount(0)
         for profile in profiles:
             if not isinstance(profile, dict):
@@ -1166,23 +1247,34 @@ class ResearchPage(QWidget):
                     for topic in settings.get("topics") or [] if isinstance(topic, dict)))
                 self.digest_ai.setChecked(settings.get("ai_summary") is True)
                 self.digest_notify.setChecked(settings.get("notify") is True)
+                channels = settings.get("notify_channels", ["telegram", "whatsapp"])
+                self.digest_telegram.setChecked("telegram" in channels)
+                self.digest_whatsapp.setChecked("whatsapp" in channels)
                 self.digest_max_items.setValue(int(settings.get("max_items") or 20))
             finally:
                 self._loading_settings = False
         state = "已开启" if settings.get("enabled") else "已关闭"
         nxt = f" · 下次 {_time(plan.get('next_run_at'))}" if plan.get("next_run_at") else ""
         self.digest_status.setText(f"每日摘要{state}{nxt}；“热点”仅为已配置来源内的相对排序。")
-        history = digest.get("history")
-        self._digest_history_ids = [
-            str(record.get("id")) for record in history if isinstance(record, dict)
-        ] if isinstance(history, list) else []
-        self.digest_history.setRowCount(0)
-        for record in history if isinstance(history, list) else []:
-            if not isinstance(record, dict):
-                continue
+        if self._digest_history_page is None:
+            history = digest.get("history")
+            self._render_digest_history(history if isinstance(history, list) else [])
+            self._request_digest_history(0)
+        latest = digest.get("latest")
+        if "digest" not in self._selected:
+            self._digest_display = latest if isinstance(latest, dict) else {}
+            self.digest_detail.setHtml(self._digest_html(latest) if isinstance(latest, dict) else
+                                       "尚无摘要。开启计划或点击“立即生成一次”。")
+            if isinstance(latest, dict) and latest.get("id"):
+                self._request_digest_detail(str(latest["id"]), 0)
+
+    def _render_digest_history(self, history: list[dict[str, Any]]) -> None:
+        self._digest_history_ids = [str(record.get("id")) for record in history]
+        self.digest_history.blockSignals(True)
+        self.digest_history.setRowCount(len(history))
+        self.digest_history.clearSelection()
+        for row, record in enumerate(history):
             counts = record.get("counts") or {}
-            row = self.digest_history.rowCount()
-            self.digest_history.insertRow(row)
             for column, value in enumerate([
                 _time(record.get("created_at")),
                 "计划" if record.get("trigger") == "schedule" else "手动",
@@ -1190,22 +1282,98 @@ class ResearchPage(QWidget):
                 f"{counts.get('matched', 0)}/{counts.get('evidence_window', 0)}",
             ]):
                 self.digest_history.setItem(row, column, QTableWidgetItem(str(value)))
-        latest = digest.get("latest")
-        self.digest_detail.setHtml(self._digest_html(latest) if isinstance(latest, dict) else
-                                   "尚无摘要。开启计划或点击“立即生成一次”。")
+            if record.get("id") == self._selected.get("digest"):
+                self.digest_history.selectRow(row)
+        self.digest_history.blockSignals(False)
+
+    def _request_digest_history(self, offset: int) -> None:
+        if self._digest_history_requested is not None:
+            return
+        self._digest_history_requested = offset
+        self.digest_history_label.setText("正在读取本地历史…")
+        self._update_digest_history_controls()
+        self.client.research_detail("digest_history", "history", offset=offset)
+
+    def _next_digest_history(self) -> None:
+        offset = (self._digest_history_page or {}).get("next_offset")
+        if type(offset) is int:
+            self._request_digest_history(offset)
+
+    def _update_digest_history_controls(self) -> None:
+        pending = self._digest_history_requested is not None
+        self.digest_history_previous.setEnabled(not pending and self._digest_history_offset > 0)
+        self.digest_history_next.setEnabled(not pending and
+            (self._digest_history_page or {}).get("next_offset") is not None)
+        self.digest_history_refresh.setEnabled(not pending)
 
     def _show_digest_record(self) -> None:
         row = self.digest_history.currentRow()
-        if row < 0 or row >= len(getattr(self, "_digest_history_ids", [])):
+        if row < 0 or row >= len(self._digest_history_ids):
             return
         identity = self._digest_history_ids[row]
+        self._digest_display = {}
+        self.digest_detail.setPlainText("正在读取本地摘要…")
+        self._request_digest_detail(identity, 0)
+
+    def _request_digest_detail(self, identity: str, offset: int) -> None:
+        if not identity:
+            return
         self._selected["digest"] = identity
-        self.client.research_detail("digest", identity)
+        self._digest_detail_requested = (identity, offset)
+        self._digest_detail_expected = (identity, offset)
+        self.digest_detail_label.setText("正在读取本地摘要…")
+        self._update_digest_detail_controls()
+        self.client.research_detail("digest", identity, offset=offset)
+
+    def _next_digest_detail(self) -> None:
+        offset = self._digest_display.get("digest_next_offset")
+        if type(offset) is int:
+            self._request_digest_detail(self._selected.get("digest", ""), offset)
+
+    def _show_latest_digest(self) -> None:
+        latest = (self._snapshot.get("digest") or {}).get("latest")
+        if isinstance(latest, dict) and latest.get("id"):
+            self._request_digest_detail(str(latest["id"]), 0)
+
+    def _update_digest_detail_controls(self) -> None:
+        pending = self._digest_detail_requested is not None
+        self.digest_detail_previous.setEnabled(not pending and int(self._digest_display.get("digest_offset", 0)) > 0)
+        self.digest_detail_next.setEnabled(not pending and self._digest_display.get("digest_next_offset") is not None)
+
+    def _open_digest_source(self, url: QUrl) -> None:
+        if url.scheme() != "alpha-guard-evidence":
+            self._open_source(url)
+            return
+        identity = unquote(url.path())
+        known = {str(entry.get("evidence_id") or "")
+                 for section in self._digest_display.get("sections") or []
+                 for entry in section.get("entries") or []}
+        known.update(str(reference.get("evidence_id") or "")
+                     for references in (self._digest_display.get("ai_summary") or {}).get("citations", {}).values()
+                     for reference in references)
+        if not identity or identity not in known or url.hasQuery() or url.hasFragment():
+            return
+        # The evidence can be older than the recent-list window; the same detail
+        # reader still opens it directly from its persisted identity.
+        self.evidence_table.blockSignals(True)
+        self.evidence_table.clearSelection()
+        for row in range(self.evidence_table.rowCount()):
+            cell = self.evidence_table.item(row, 0)
+            if cell is not None and cell.data(Qt.ItemDataRole.UserRole) == identity:
+                self.evidence_table.selectRow(row)
+                break
+        self.evidence_table.blockSignals(False)
+        self._select_detail("evidence", identity)
+        for index in range(self.tabs.count()):
+            panel = self.tabs.widget(index)
+            if panel is not None and panel.isAncestorOf(self.evidence_table):
+                self.tabs.setCurrentIndex(index)
+                break
 
     @staticmethod
     def _digest_html(latest: dict[str, Any]) -> str:
         parts = [
-            f"<h2>最近摘要 · {_escape(_time(latest.get('created_at')))}</h2>",
+            f"<h2>摘要 · {_escape(_time(latest.get('created_at')))}</h2>",
             f"<p>{_escape(STATUSES.get(str(latest.get('status')), '未知'))}"
             + (f" · {_escape(str(latest.get('detail')))}" if latest.get("detail") else "") + "</p>",
         ]
@@ -1216,19 +1384,40 @@ class ResearchPage(QWidget):
         )
         ai = latest.get("ai_summary") or {}
         if ai.get("enabled"):
-            parts.append(f"<p>AI 汇总：{_escape(DIGEST_AI_STATUSES.get(str(ai.get('status')), str(ai.get('status'))))}</p>")
+            parts.append(f"<p>AI 原文选读：{_escape(DIGEST_AI_STATUSES.get(str(ai.get('status')), str(ai.get('status'))))}</p>")
         delivery = latest.get("delivery") or {}
         if delivery.get("enabled"):
             parts.append(f"<p>投递：{_escape(DIGEST_DELIVERY_STATUSES.get(str(delivery.get('status')), str(delivery.get('status'))))}</p>")
+            for channel in delivery.get("channels") or []:
+                name = {"telegram": "Telegram", "whatsapp": "WhatsApp"}.get(channel.get("channel"), "未知渠道")
+                content = "已批准模板；不含摘要正文" if channel.get("content") == "static_template" else "摘要正文"
+                status = DIGEST_DELIVERY_STATUSES.get(str(channel.get("status")), "结果未知")
+                parts.append(f"<p>{name} · {_escape(content)} · {_escape(status)}</p>")
+            if delivery.get("detail") == "whatsapp_static_template_only" and not delivery.get("channels"):
+                parts.append("<p>WhatsApp 只发送模板通知，不含摘要正文。</p>")
         for section in latest.get("sections") or []:
             entries = section.get("entries") or []
             summary = (ai.get("sections") or {}).get(section.get("key"))
-            block = [f"<h3>{_escape(section.get('label'))}（{len(entries)} 条）</h3>"]
-            if isinstance(summary, str) and summary:
+            total = section.get("entry_total", len(entries))
+            start = section.get("entry_offset", 0)
+            count_label = (f"共 {total} 条 · 当前 {start + 1}–{start + len(entries)}"
+                           if total != len(entries) else f"{len(entries)} 条")
+            block = [f"<h3>{_escape(section.get('label'))}（{count_label}）</h3>"]
+            references = (ai.get("citations") or {}).get(section.get("key")) or []
+            if references:
+                for reference in references:
+                    identity = quote(str(reference.get("evidence_id") or ""), safe="")
+                    block.append(f'<blockquote>{_escape(reference.get("quote"))} '
+                                 f'<a href="alpha-guard-evidence:{identity}">核对本地原文</a></blockquote>')
+            elif isinstance(summary, str) and summary:
                 block.append(f"<p>{_escape(summary)}</p>")
-            block.append("<ul>" + "".join(
-                f"<li>{_source_link(str(entry.get('source_url') or ''), str(entry.get('title') or '（无标题）'), _safe_url)}</li>"
-                for entry in entries) + "</ul>")
+            block.append("<ul>")
+            for entry in entries:
+                identity = str(entry.get("evidence_id") or "")
+                local = (f' · <a href="alpha-guard-evidence:{quote(identity, safe="")}">查看本地证据</a>'
+                         if identity else "")
+                block.append(f"<li>{_source_link(str(entry.get('source_url') or ''), str(entry.get('title') or '（无标题）'), _safe_url)}{local}</li>")
+            block.append("</ul>")
             parts.append("".join(block))
         gaps = latest.get("coverage_gaps") or []
         if gaps:
@@ -1295,6 +1484,14 @@ class ResearchPage(QWidget):
         if not purpose.startswith("research-"):
             return
         if purpose == "research-detail":
+            if self._digest_history_requested is not None:
+                self._digest_history_requested = None
+                self.digest_history_label.setText("历史读取失败，保留上次结果，可刷新重试")
+                self._update_digest_history_controls()
+            if self._digest_detail_requested is not None:
+                self._digest_detail_requested = None
+                self.digest_detail_label.setText("摘要读取失败，可重新选择或重试翻页")
+                self._update_digest_detail_controls()
             for kind in tuple(self._detail_pending):
                 self._detail_pending.discard(kind)
                 self._page_moves.pop(kind, None)
@@ -1341,7 +1538,13 @@ class ResearchPage(QWidget):
         self.digest_save_button.setEnabled(
             self._loaded and not (self._pending & {"digest_save"}))
         self.digest_run_button.setEnabled(
-            self._loaded and not running and not (self._pending & {"digest_once"}))
+            self._loaded and not running and not self._digest_dirty
+            and not (self._pending & {"digest_once", "digest_save"}))
+        for control in (self.digest_enabled, self.digest_time, self.digest_topics,
+                        self.digest_ai, self.digest_notify, self.digest_max_items):
+            control.setEnabled("digest_save" not in self._pending)
+        for checkbox in (self.digest_telegram, self.digest_whatsapp):
+            checkbox.setEnabled(self.digest_notify.isChecked() and "digest_save" not in self._pending)
         self.settings_content.setEnabled(
             not running and not launching and "configure" not in self._pending
         )
@@ -1577,7 +1780,13 @@ class ResearchPage(QWidget):
         if item is None:
             return
         identity = str(item.data(Qt.ItemDataRole.UserRole))
+        self._select_detail(kind, identity)
+
+    def _select_detail(self, kind: str, identity: str) -> None:
         self._selected[kind] = identity
+        if kind == "report":
+            self.review_report_button.setEnabled(bool(identity))
+            self.report_instrument_button.setEnabled(False)
         self._detail_items.pop(kind, None)
         self._page_moves.pop(kind, None)
         for field in ("content", "segment") if kind == "evidence" else ("claim",):
@@ -1693,11 +1902,37 @@ class ResearchPage(QWidget):
         if not isinstance(payload, dict) or not isinstance(payload.get("item"), dict):
             return
         kind = payload.get("kind")
+        if kind == "digest_history":
+            item = payload["item"]
+            offset = item.get("offset")
+            records = item.get("items")
+            if (payload.get("id") != "history" or type(offset) is not int
+                    or offset != self._digest_history_requested or not isinstance(records, list)
+                    or any(not isinstance(record, dict) for record in records)):
+                return
+            self._digest_history_requested = None
+            self._digest_history_offset = offset
+            self._digest_history_page = item
+            self._render_digest_history(records)
+            self.digest_history_label.setText(
+                f"历史第 {offset + 1}–{offset + len(records)} 条" if records else "没有更多历史摘要")
+            self._update_digest_history_controls()
+            return
         if self._selected.get(str(kind)) != payload.get("id"):
             return
         item = payload["item"]
         if kind == "digest":
+            offset = item.get("digest_offset", 0)
+            if self._digest_detail_expected is not None and self._digest_detail_expected != (payload["id"], offset):
+                return
+            self._digest_detail_requested = None
+            self._digest_display = item
             self.digest_detail.setHtml(self._digest_html(item))
+            total = item.get("digest_total")
+            self.digest_detail_label.setText(
+                f"摘要条目 {offset + 1}–{min(offset + 20, total)} / {total}"
+                if type(total) is int and total else "完整摘要")
+            self._update_digest_detail_controls()
             return
         if kind not in {"evidence", "report"}:
             return
@@ -1720,6 +1955,7 @@ class ResearchPage(QWidget):
         self._detail_pending.discard(kind)
         self._detail_items[kind] = item
         if kind == "report":
+            self.report_instrument_button.setEnabled(bool(self._report_instrument()))
             self.report_detail.setHtml(self._report_html(item))
         elif kind == "evidence":
             if not self._evidence_view_initialized:
@@ -1729,6 +1965,16 @@ class ResearchPage(QWidget):
                 self._evidence_html(item, view=str(self.evidence_view.currentData()))
             )
         self._update_pager(kind)
+
+    def _report_instrument(self) -> str:
+        instrument = self._detail_items.get("report", {}).get("instrument") or {}
+        market, ticker = instrument.get("market"), instrument.get("ticker")
+        return f"{market}:{ticker}" if market in {"US", "HK", "CN"} and isinstance(ticker, str) and ticker else ""
+
+    def _open_report_instrument(self) -> None:
+        key = self._report_instrument()
+        if key:
+            self.instrument_requested.emit(key)
 
     @staticmethod
     def _report_html(item: dict[str, Any]) -> str:
@@ -1787,6 +2033,7 @@ class ResearchPage(QWidget):
         parts.append(
             f"<p>行情来源时间：{_escape(_time(context.get('source_as_of')))}<br>独立内容组：{_escape(item.get('independent_source_count', 1))}，不代表已独立证实。</p>"
         )
+        parts.append(generation_html(item.get("generation_context")))
         return "".join(parts)
 
     @staticmethod

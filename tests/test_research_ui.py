@@ -951,11 +951,171 @@ def test_digest_tab_populates_saves_settings_and_runs_once(qt_app):
     assert command == 'digest_save'
     assert fields['settings']['topics'] == [{'label': '创新药', 'keywords': ['临床', 'FDA']}]
     assert fields['settings']['ai_summary'] is True
+    assert fields['settings']['notify_channels'] == ['telegram', 'whatsapp']
+    assert not page.digest_run_button.isEnabled()
     page.digest_run_button.click()
-    assert client.commands[-1][0] == 'digest_once'
+    assert client.commands[-1][0] == 'digest_save'
     client.action_completed.emit(ActionReceipt('research-digest_save', True, 'Guardian 已接受请求', 'd1'))
     assert not page._digest_dirty
+    page.digest_run_button.click()
+    assert client.commands[-1][0] == 'digest_once'
     page.digest_history.selectRow(0)
     assert client.details[-1] == ('digest', 'd0')
     page.set_detail({'kind': 'digest', 'id': 'd0', 'item': digest['history'][0]})
+    page.close()
+
+
+def test_digest_channels_preserve_unsaved_choice_and_require_save_before_run(qt_app):
+    client, page = _loaded_page(qt_app)
+    saved = {'settings': {'notify': True, 'notify_channels': ['telegram']}}
+    client.research_ready.emit(_snapshot(digest=saved))
+    assert page.digest_telegram.isChecked() and not page.digest_whatsapp.isChecked()
+    page.digest_telegram.setChecked(False)
+    page.digest_whatsapp.setChecked(True)
+    client.research_ready.emit(_snapshot(digest=saved))
+    assert not page.digest_telegram.isChecked() and page.digest_whatsapp.isChecked()
+    before = list(client.commands)
+    page._run_digest_once()
+    assert client.commands == before
+    page._save_digest_settings()
+    assert client.commands[-1][1]['settings']['notify_channels'] == ['whatsapp']
+    assert not page.digest_telegram.isEnabled()
+    client.action_completed.emit(ActionReceipt('research-digest_save', True, 'saved', 'channels'))
+    assert page.digest_whatsapp.isEnabled()
+    page.digest_whatsapp.setChecked(False)
+    before = list(client.commands)
+    page._save_digest_settings()
+    assert client.commands == before
+    assert '至少选择一个' in page.message_label.text()
+    page.close()
+
+
+def test_digest_delivery_shows_acceptance_and_template_limits(qt_app):
+    client, page = _loaded_page(qt_app)
+    record = {'status': 'completed', 'delivery': {'enabled': True, 'status': 'partial', 'channels': [
+        {'channel': 'telegram', 'content': 'summary_text', 'status': 'accepted'},
+        {'channel': 'whatsapp', 'content': 'static_template', 'status': 'not_configured'},
+    ]}}
+    page.digest_detail.setHtml(page._digest_html(record))
+    text = page.digest_detail.toPlainText()
+    assert '服务已接受，接收待确认' in text
+    assert 'WhatsApp' in text and '不含摘要正文' in text and '未配置' in text
+    assert '部分通道未接受' in text
+    page.close()
+
+
+def _digest_record(identity, title='保存的原文'):
+    return {'id': identity, 'created_at': '2026-10-03T01:30:00+00:00',
+            'status': 'completed', 'trigger': 'manual', 'counts': {},
+            'sections': [{'key': 'US:AAPL', 'label': 'Apple', 'entries': [
+                {'evidence_id': f'evidence-{identity}', 'title': title,
+                 'source_url': 'https://example.org/article'}]}]}
+
+
+def test_digest_history_pagination_preserves_selected_record_across_refresh(qt_app):
+    client, page = _loaded_page(qt_app)
+    first = _digest_record('first')
+    client.research_ready.emit(_snapshot(digest={'latest': first, 'history': []}))
+    assert ('digest_history', 'history') in client.details
+    assert client.detail_offsets[client.details.index(('digest_history', 'history'))] == (0, 0)
+    records = [_digest_record(f'history-{index}') for index in range(20)]
+    client.research_detail_ready.emit({'kind': 'digest_history', 'id': 'history', 'item': {
+        'offset': 0, 'next_offset': 20, 'items': records}})
+    assert page.digest_history.rowCount() == 20
+    page.digest_history.selectRow(5)
+    selected = records[5]
+    client.research_detail_ready.emit({'kind': 'digest', 'id': selected['id'], 'item': selected})
+    shown = page.digest_detail.toPlainText()
+    client.research_ready.emit(_snapshot(digest={'latest': _digest_record('newest', '另一份摘要'), 'history': []}))
+    assert page._selected['digest'] == selected['id']
+    assert page.digest_history.currentRow() == 5
+    assert page.digest_detail.toPlainText() == shown
+    page.digest_history_next.click()
+    assert client.detail_offsets[-1] == (20, 0)
+    client.research_detail_ready.emit({'kind': 'digest_history', 'id': 'history', 'item': {
+        'offset': 0, 'next_offset': 20, 'items': records}})  # late page
+    assert page._digest_history_requested == 20
+    client.research_detail_ready.emit({'kind': 'digest_history', 'id': 'history', 'item': {
+        'offset': 20, 'next_offset': None, 'items': [_digest_record('oldest')]}})
+    assert page.digest_history.rowCount() == 1
+    assert page.digest_history_previous.isEnabled() and not page.digest_history_next.isEnabled()
+    assert page.digest_detail.toPlainText() == shown
+    page.digest_history_previous.click()
+    assert client.detail_offsets[-1] == (0, 0)
+    page.close()
+
+
+def test_digest_links_open_local_evidence_outside_recent_list_and_original_url(qt_app, monkeypatch):
+    client, page = _loaded_page(qt_app)
+    opened = []
+    monkeypatch.setattr('desktop.ui.research_page.QDesktopServices.openUrl', lambda url: opened.append(url.toString()))
+    record = _digest_record('old')
+    page._selected['digest'] = record['id']
+    page.set_detail({'kind': 'digest', 'id': record['id'], 'item': record})
+    assert '查看本地证据' in page.digest_detail.toPlainText()
+    page.digest_detail.anchorClicked.emit(QUrl('alpha-guard-evidence:evidence-old'))
+    assert client.details[-1] == ('evidence', 'evidence-old')
+    assert page.tabs.currentIndex() == 1 and opened == []
+    client.research_detail_ready.emit({'kind': 'evidence', 'id': 'evidence-old', 'item': {
+        'id': 'evidence-old', 'content_text': '原始材料仍可读', 'title': '旧材料', 'segments': []}})
+    assert '原始材料仍可读' in page.evidence_detail.toPlainText()
+    before = list(client.details)
+    page.digest_detail.anchorClicked.emit(QUrl('alpha-guard-evidence:unrelated'))
+    assert client.details == before
+    page.digest_detail.anchorClicked.emit(QUrl('https://example.org/article'))
+    assert opened == ['https://example.org/article']
+    page.close()
+
+
+def test_digest_history_read_failure_keeps_visible_page_and_can_retry(qt_app):
+    client, page = _loaded_page(qt_app)
+    page._request_digest_history(0)
+    client.research_detail_ready.emit({'kind': 'digest_history', 'id': 'history', 'item': {
+        'offset': 0, 'next_offset': 20, 'items': [_digest_record('saved')]}})
+    page.digest_history_next.click()
+    client.request_failed.emit('research-detail', 'request_timeout')
+    assert page.digest_history.rowCount() == 1
+    assert '保留上次结果' in page.digest_history_label.text()
+    assert page.digest_history_next.isEnabled()
+    page.digest_history_next.click()
+    assert client.detail_offsets[-1] == (20, 0)
+    page.close()
+
+
+def test_digest_detail_pager_ignores_late_page_and_keeps_ai_citation_links(qt_app):
+    client, page = _loaded_page(qt_app)
+    record = _digest_record('paged')
+    record.update(digest_offset=0, digest_next_offset=20, digest_total=25)
+    record['ai_summary'] = {'enabled': True, 'status': 'generated',
+        'sections': {'US:AAPL': '完整标题'},
+        'citations': {'US:AAPL': [{'evidence_id': 'original-ai-evidence', 'quote': '完整标题'}]}}
+    page._request_digest_detail('paged', 0)
+    client.research_detail_ready.emit({'kind': 'digest', 'id': 'paged', 'item': record})
+    assert page.digest_detail_next.isEnabled()
+    assert '核对本地原文' in page.digest_detail.toPlainText()
+    page.digest_detail_next.click()
+    assert client.detail_offsets[-1] == (20, 0)
+    client.research_detail_ready.emit({'kind': 'digest', 'id': 'paged', 'item': record})
+    assert page._digest_detail_requested == ('paged', 20)
+    second = {**record, 'digest_offset': 20, 'digest_next_offset': None}
+    client.research_detail_ready.emit({'kind': 'digest', 'id': 'paged', 'item': second})
+    assert page.digest_detail_previous.isEnabled() and not page.digest_detail_next.isEnabled()
+    client.research_detail_ready.emit({'kind': 'digest', 'id': 'paged', 'item': record})
+    assert page._digest_display['digest_offset'] == 20  # late first-page reply after completion
+    page.digest_detail.anchorClicked.emit(QUrl('alpha-guard-evidence:original-ai-evidence'))
+    assert client.details[-1] == ('evidence', 'original-ai-evidence')
+    page.close()
+
+
+def test_model_current_label_tracks_api_and_default_switch(qt_app):
+    page = ResearchPage(GuardianClient())
+    page._snapshot = {"capabilities": {"model_provider": "codex_cli"}, "model_profiles": []}
+    page._populate_models()
+    assert "本机 Codex" in page.model_current.text()
+    page._snapshot["capabilities"] = {"model_provider": "profile:ZCode", "model_profile_active": {"name": "ZCode", "model": "configured-model"}}
+    page._populate_models()
+    assert "ZCode" in page.model_current.text() and "本机 Codex" not in page.model_current.text()
+    page._snapshot["capabilities"] = {"model_provider": "codex_cli"}
+    page._populate_models()
+    assert "本机 Codex" in page.model_current.text()
     page.close()

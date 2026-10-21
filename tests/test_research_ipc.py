@@ -241,3 +241,87 @@ def test_login_ipc_does_not_collect_or_activate_and_restart_stays_stopped(applic
         assert state['runtime']['next_run_at'] is None and state['runs'] == []
     finally:
         restarted.close()
+
+
+def test_digest_history_pages_all_records_offline_and_links_original_evidence(application, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from research.service import ResearchService
+    from research.store import ResearchStore
+
+    app, path = application
+    monkeypatch.setattr(ResearchService, 'launch', lambda *a, **kw: pytest.fail('history must stay offline'))
+    now = datetime.now(UTC)
+    with ResearchStore(path) as store:
+        evidence = store.upsert_evidence({'source_url': 'https://example.org/original',
+            'title': 'Original material', 'content_text': 'Persisted original evidence.',
+            'content_kind': 'article', 'completeness': 'full', 'published_at': now.isoformat()})
+        for index in range(43):
+            store.save_digest_record({'id': f'digest-{index}', 'created_at': (now + timedelta(seconds=index)).isoformat(),
+                'status': 'completed', 'trigger': 'manual', 'counts': {},
+                'sections': [{'key': 'US:AAPL', 'entries': [{'evidence_id': evidence.id,
+                    'title': evidence.title, 'source_url': evidence.source_url}]}]})
+    offset, identities = 0, []
+    while True:
+        response = app.handle(request('research.detail', {'kind': 'digest_history', 'id': 'history', 'offset': offset}))
+        assert isinstance(response, RpcSuccessResponse)
+        page = response.result
+        assert page['offset'] == offset
+        assert len(page['items']) <= 20
+        assert all('sections' not in item for item in page['items'])
+        assert len(serialize_response(response)) < 1_048_576
+        identities.extend(item['id'] for item in page['items'])
+        offset = page['next_offset']
+        if offset is None:
+            break
+    assert identities == [f'digest-{index}' for index in range(42, -1, -1)]
+    record = app.handle(request('research.detail', {'kind': 'digest', 'id': 'digest-0'}))
+    identity = record.result['sections'][0]['entries'][0]['evidence_id']
+    detail = app.handle(request('research.detail', {'kind': 'evidence', 'id': identity}))
+    assert detail.result['content_text'] == 'Persisted original evidence.'
+
+
+@pytest.mark.parametrize('params', [
+    {'kind': 'digest_history', 'id': 'other'},
+    {'kind': 'digest_history', 'id': 'history', 'offset': True},
+    {'kind': 'digest_history', 'id': 'history', 'offset': -1},
+    {'kind': 'digest_history', 'id': 'history', 'offset': 1_000_001},
+    {'kind': 'digest_history', 'id': 'history', 'segment_offset': 1},
+])
+def test_digest_history_rejects_invalid_page(application, params):
+    app, _ = application
+    response = app.handle(request('research.detail', params))
+    assert isinstance(response, RpcErrorResponse)
+    assert response.error.data.kind == 'invalid_params'
+
+
+def test_digest_detail_paginates_large_unicode_groups_without_losing_entries(application):
+    from research.service import ResearchService
+    from research.store import ResearchStore
+
+    app, path = application
+    sections = [{'key': f'group-{group}', 'label': '组' * 80, 'entries': [
+        {'evidence_id': f'{group}-{index}', 'title': '🚀' * 1000,
+         'source_url': 'https://example.org/' + '🚀' * 2000}
+        for index in range(25)]} for group in range(6)]
+    sections.insert(2, {'key': 'empty', 'label': '空组', 'entries': []})
+    record = {'id': 'large-digest', 'created_at': '2026-10-03T01:30:00+00:00',
+              'status': 'completed', 'sections': sections, 'counts': {}}
+    with ResearchStore(path) as store:
+        store.save_digest_record(record)
+    offset, collected, empties = 0, {}, set()
+    while True:
+        response = app.handle(request('research.detail', {'kind': 'digest', 'id': 'large-digest', 'offset': offset}))
+        assert isinstance(response, RpcSuccessResponse)
+        assert len(serialize_response(response)) < 1_048_576
+        page = response.result
+        assert page['digest_offset'] == offset
+        for section in page['sections']:
+            collected.setdefault(section['key'], []).extend(section['entries'])
+            if not section['entries']:
+                empties.add(section['key'])
+        offset = page['digest_next_offset']
+        if offset is None:
+            break
+    assert collected == {section['key']: section['entries'] for section in sections}
+    assert empties == {'empty'}
+    assert ResearchService(path).detail('digest', 'large-digest', full=True) == record

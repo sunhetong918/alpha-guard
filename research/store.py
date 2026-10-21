@@ -6,6 +6,7 @@ import math
 import sqlite3
 import threading
 from collections.abc import Mapping
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,26 @@ class ResearchStore:
                 self._connection.backup(backup)
         self._connection.executescript(_SCHEMA)
         self._connection.commit()
+
+    def ensure_feature_schema(self, schema: str, tables: tuple[str, ...]) -> None:
+        """Apply a module-owned additive schema, backing up an existing database.
+
+        Callers pass constant DDL and table names, never user-provided SQL.
+        Separate workflow stores share this database and its backup discipline.
+        """
+        with self._lock:
+            present = {row[0] for row in self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            if set(tables).issubset(present):
+                return
+            if self.path != ":memory:":
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                self.backup_path = Path(f"{self.path}.pre-workflow-{stamp}.bak")
+                with sqlite3.connect(self.backup_path) as backup:
+                    self._connection.backup(backup)
+            self._connection.executescript(schema)
+            self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -301,6 +322,7 @@ class ResearchStore:
             ).rowcount > 0
 
     def save_report(self, report: ResearchReport) -> ResearchReport:
+        self.ensure_report_overview_index()
         with self._lock, self._connection:
             self._connection.execute(
                 "INSERT OR IGNORE INTO research_reports VALUES (?, ?, ?, ?)",
@@ -310,6 +332,24 @@ class ResearchStore:
                 "SELECT payload_json FROM research_reports WHERE id=?", (report.id,)
             ).fetchone()
         return ResearchReport.model_validate_json(row[0])
+
+    def ensure_report_overview_index(self) -> None:
+        """Build the security lookup only on a report write, never an overview read."""
+        with self._lock:
+            if self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='research_reports_instrument_time'"
+            ).fetchone():
+                return
+            if self.path != ":memory:":
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                self.backup_path = Path(f"{self.path}.pre-overview-index-{stamp}.bak")
+                with closing(sqlite3.connect(self.backup_path)) as backup:
+                    self._connection.backup(backup)
+            self._connection.execute("""CREATE INDEX IF NOT EXISTS research_reports_instrument_time
+                ON research_reports(json_extract(payload_json,'$.instrument.market'),
+                                    json_extract(payload_json,'$.instrument.ticker'),
+                                    julianday(created_at) DESC,id)""")
+            self._connection.commit()
 
     def _report_view(self, report: ResearchReport, now: datetime) -> ResearchReport:
         report = report.at_time(now)

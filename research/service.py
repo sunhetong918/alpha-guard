@@ -7,7 +7,8 @@ import importlib.util
 import json
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +27,7 @@ class ResearchOptions(BaseModel):
     horizons: list[Literal["short", "swing", "long"]] = Field(
         default=["swing", "long"]
     )
-    instruments: list[ResearchInstrument] = Field(default_factory=list, max_length=50)
+    instruments: list[ResearchInstrument] = Field(default_factory=list, max_length=100)
     interval_minutes: int = Field(default=15, ge=1, le=1440)
     ai_enabled: bool = False
     news_enabled: bool = True
@@ -115,8 +116,24 @@ class ResearchService:
         self._stage = "idle"
         self._next_run_at: str | None = None
         self._last_run: dict[str, Any] | None = None
+        self._run_id: str | None = None
         # Set by the Guardian when the digest scheduler exists; CLI sessions stay null.
         self.digest_scheduler: Any | None = None
+        if not self.path.is_file():
+            return
+        # Recover only while owning the cross-process lease. Merely opening a
+        # second window must not interrupt another window's live batch.
+        try:
+            lease = ResearchLease(self.path)
+        except ValueError:
+            pass
+        else:
+            try:
+                from .progress import ProgressStore
+                with ProgressStore(self.path) as progress:
+                    progress.recover()
+            finally:
+                lease.close()
 
     def _options(self) -> ResearchOptions:
         with ResearchStore(self.path) as store:
@@ -164,6 +181,7 @@ class ResearchService:
                 "next_run_at": self._next_run_at,
                 "last_run": self._last_run,
                 "restart_policy": "stopped",
+                "run_id": self._run_id,
             }
         with ResearchStore(self.path) as store:
             options = ResearchOptions.model_validate(store.load_settings() or {})
@@ -211,7 +229,7 @@ class ResearchService:
             item["segments"] = []
             item["quality_issues"] = [str(value)[:80] for value in item.get("quality_issues", [])[:4]]
         for report in reports:
-            for key in ("claims", "market_context", "catalysts", "counter_evidence", "conditions", "invalidation", "verification_steps"):
+            for key in ("claims", "market_context", "generation_context", "catalysts", "counter_evidence", "conditions", "invalidation", "verification_steps"):
                 report.pop(key, None)
             for key, value in report.items():
                 if isinstance(value, str):
@@ -220,6 +238,7 @@ class ResearchService:
         return {
             "page": page, "next_page": page + 1 if more else None, "window_limit": window_limit,
             "runtime": runtime,
+            "run_progress": self.run_list()["items"][:1],
             "capabilities": capabilities,
             "settings": options.model_dump(mode="json"),
             "model_profiles": model_profiles,
@@ -232,16 +251,28 @@ class ResearchService:
         }
 
     def detail(self, kind: str, identity: str, *, offset: int = 0, segment_offset: int = 0, full: bool = False) -> dict[str, Any]:
-        if kind not in {"evidence", "report", "digest"} or not identity or len(identity) > 128:
+        if kind not in {"evidence", "report", "digest", "digest_history"} or not identity or len(identity) > 128:
             raise ValueError("invalid research detail")
         if type(offset) is not int or type(segment_offset) is not int or min(offset, segment_offset) < 0:
             raise ValueError("invalid detail offset")
+        if kind == "digest_history":
+            if identity != "history" or segment_offset or offset > 1_000_000:
+                raise ValueError("invalid digest history page")
+            with ResearchStore(self.path) as store:
+                records = store.list_digests(limit=21, offset=offset)
+            # Lists contain metadata only; full records use the existing detail path.
+            return {"offset": offset, "next_offset": offset + 20 if len(records) > 20 else None,
+                    "items": [{key: record.get(key) for key in
+                               ("id", "created_at", "trigger", "status", "detail", "counts")}
+                              for record in records[:20]]}
         if kind == "digest":
             with ResearchStore(self.path) as store:
                 record = store.get_digest(identity)
             if record is None:
                 raise ValueError("research item not found")
-            return record
+            if full:
+                return record
+            return self._digest_detail_page(record, offset=offset)
         with ResearchStore(self.path) as store:
             item = store.get_evidence(identity) if kind == "evidence" else store.get_report(identity)
             conflicts = store.conflicting_profiles() if kind == "report" else set()
@@ -279,6 +310,31 @@ class ResearchService:
                 result[key] = result[key][offset:offset + 10]
             result["claim_offset"] = offset
             result["claim_next_offset"] = offset + 10 if offset + 10 < size else None
+        return result
+
+    @staticmethod
+    def _digest_detail_page(record: dict[str, Any], *, offset: int) -> dict[str, Any]:
+        """Page across entries, including empty groups, without losing their context."""
+        sections: list[dict[str, Any]] = []
+        cursor = 0
+        for section in record.get("sections") or []:
+            entries = section.get("entries") or []
+            size = max(1, len(entries))
+            begin, end = max(0, offset - cursor), min(size, offset + 20 - cursor)
+            if begin < end:
+                sections.append({**section, "entries": entries[begin:end],
+                                 "entry_offset": begin, "entry_total": len(entries)})
+            cursor += size
+        keys = {section.get("key") for section in sections}
+        ai = record.get("ai_summary") or {}
+        result = {key: record.get(key) for key in (
+            "id", "created_at", "trigger", "status", "detail", "window_start",
+            "counts", "coverage_gaps", "delivery")}
+        result.update(sections=sections, digest_offset=offset, digest_total=cursor,
+                      digest_next_offset=offset + 20 if offset + 20 < cursor else None,
+                      ai_summary={**{key: ai.get(key) for key in ("enabled", "status", "detail")},
+                                  "sections": {key: text for key, text in (ai.get("sections") or {}).items() if key in keys},
+                                  "citations": {key: values for key, values in (ai.get("citations") or {}).items() if key in keys}})
         return result
 
     @staticmethod
@@ -360,12 +416,21 @@ class ResearchService:
         with ResearchStore(self.path) as store:
             return [profile_public(profile) for profile in store.list_model_profiles()]
 
-    def save_model_profile(self, values: Mapping[str, Any]) -> dict[str, Any]:
-        """Upsert one profile; a supplied api_key only ever reaches the key store."""
-        from datetime import UTC as _UTC
+    @contextmanager
+    def _profile_change(self) -> Iterator[ResearchStore]:
+        """Hold the same local and cross-process gate for every profile mutation."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise ValueError("stop monitoring before changing research settings")
+            # The lease also excludes a scheduled or manual digest in any session.
+            # Acquire it before touching credentials, not merely before the SQL write.
+            with ResearchLease(self.path), ResearchStore(self.path) as store:
+                yield store
 
-        from .model_key_store import ModelKeyStore
-        from .model_profiles import build_profile, profile_public
+    def save_model_profile(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Upsert one profile without changing an in-flight run's key or identity."""
+        from .model_key_store import ModelKeyStore, ModelKeyStoreError
+        from .model_profiles import MAX_PROFILES, build_profile, profile_public
 
         if not isinstance(values, dict) or not isinstance(values.get("profile"), dict):
             raise ValueError("invalid model profile payload")
@@ -373,53 +438,81 @@ class ResearchService:
         if api_key is not None and not isinstance(api_key, str):
             raise ValueError("invalid model key")
         payload = dict(values["profile"])
-        with ResearchStore(self.path) as store:
+        with self._profile_change() as store:
             identity = str(payload.get("id") or "")
             existing = store.get_model_profile(identity) if identity else None
             if identity and existing is None:
                 raise ValueError("model profile not found")
             profile = build_profile(payload, existing=existing)
+            if existing is None and len(store.list_model_profiles()) >= MAX_PROFILES:
+                raise ValueError("at most 20 model profiles are supported")
             keys = ModelKeyStore()
-            if api_key:
-                keys.save(profile.id, api_key)
-                profile = profile.model_copy(update={
-                    "key_configured": True,
-                    "key_updated_at": datetime.now(_UTC).isoformat(),
-                })
-            elif api_key == "" and existing is not None and existing.key_configured:
-                keys.delete(profile.id)
-                profile = profile.model_copy(update={"key_configured": False, "key_updated_at": None})
-            saved = store.save_model_profile(profile)
+            change_key = bool(api_key) or (api_key == "" and existing is not None and existing.key_configured)
+            previous_key = keys.load(profile.id) if change_key else None
+            try:
+                if api_key:
+                    keys.save(profile.id, api_key)
+                    profile = profile.model_copy(update={
+                        "key_configured": True,
+                        "key_updated_at": datetime.now(UTC).isoformat(),
+                    })
+                elif change_key:
+                    keys.delete(profile.id)
+                    profile = profile.model_copy(update={"key_configured": False, "key_updated_at": None})
+                saved = store.save_model_profile(profile)
+            except Exception:
+                if change_key:
+                    try:
+                        if previous_key is None:
+                            keys.delete(profile.id)
+                        else:
+                            keys.save(profile.id, previous_key)
+                    except Exception:
+                        raise ModelKeyStoreError("model key rollback failed") from None
+                raise
         return profile_public(saved)
 
     def delete_model_profile(self, identity: str) -> None:
-        from .model_key_store import ModelKeyStore
+        from .model_key_store import ModelKeyStore, ModelKeyStoreError
 
         if not isinstance(identity, str) or not identity or len(identity) > 64:
             raise ValueError("invalid model profile id")
-        with ResearchStore(self.path) as store:
-            if store.get_model_profile(identity) is None:
+        with self._profile_change() as store:
+            profile = store.get_model_profile(identity)
+            if profile is None:
                 raise ValueError("model profile not found")
-            settings = store.load_settings()
-            if settings.get("model_profile_id") == identity:
-                settings["model_profile_id"] = None
-                store.save_settings(settings)
-            store.delete_model_profile(identity)
-        ModelKeyStore().delete(identity)
+            keys = ModelKeyStore()
+            previous_key = keys.load(identity) if profile.key_configured else None
+            original_settings = store.load_settings()
+            settings = dict(original_settings)
+            try:
+                if settings.get("model_profile_id") == identity:
+                    settings["model_profile_id"] = None
+                    store.save_settings(settings)
+                store.delete_model_profile(identity)
+                keys.delete(identity)
+            except Exception:
+                # SQL and the OS credential store cannot share a transaction. Keep
+                # the lease while restoring the prior profile, pointer and key.
+                try:
+                    store.save_model_profile(profile)
+                    store.save_settings(original_settings)
+                    if previous_key is not None:
+                        keys.save(identity, previous_key)
+                except Exception:
+                    raise ModelKeyStoreError("model profile rollback failed") from None
+                raise
 
     def activate_model_profile(self, identity: str | None) -> dict[str, Any]:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                raise ValueError("stop monitoring before changing research settings")
-            with ResearchLease(self.path), ResearchStore(self.path) as store:
-                settings = store.load_settings()
-                if identity is not None:
-                    profile = store.get_model_profile(identity)
-                    if profile is None or not profile.enabled:
-                        raise ValueError("model profile not found or disabled")
-                settings["model_profile_id"] = identity
-                store.save_settings(settings)
-                return {"model_profile_id": identity}
+        with self._profile_change() as store:
+            settings = store.load_settings()
+            if identity is not None:
+                profile = store.get_model_profile(identity)
+                if profile is None or not profile.enabled:
+                    raise ValueError("model profile not found or disabled")
+            settings["model_profile_id"] = identity
+            store.save_settings(settings)
+            return {"model_profile_id": identity}
 
     def test_model_profile(self, identity: str) -> dict[str, Any]:
         from .model_key_store import ModelKeyStore
@@ -453,12 +546,110 @@ class ResearchService:
 
         return submit_manual_digest(self.path)
 
+    def _progress_signature(self, options: ResearchOptions) -> str:
+        from config import get_settings
+        from .analysis import ANALYZER_VERSION, generation_config_signature
+        from .model_profiles import active_model_profile
+        from .models import digest
+
+        if not options.ai_enabled:
+            return digest([ANALYZER_VERSION, "disabled"])
+        with ResearchStore(self.path) as store:
+            profile = active_model_profile(store)
+        instruments = [item for item in options.instruments if item.market in options.markets]
+        return generation_config_signature(get_settings(), instruments, options.horizons, profile=profile)
+
+    def run_list(self, *, offset: int = 0) -> dict[str, Any]:
+        from .progress import ProgressStore
+
+        if type(offset) is not int or not 0 <= offset <= 1_000_000:
+            raise ValueError("invalid run offset")
+        options = self._options()
+        signature = self._progress_signature(options)
+        with ProgressStore(self.path) as store:
+            rows = store._connection.execute(
+                "SELECT id FROM research_scan_runs ORDER BY created_at DESC,id LIMIT 21 OFFSET ?", (offset,)).fetchall()
+            items = []
+            for row in rows[:20]:
+                reason = store.incompatibility(row[0], options.model_dump(mode="json"), signature)
+                items.append(store.summary(row[0], reason=reason))
+        return {"items": items, "offset": offset, "next_offset": offset + 20 if len(rows) > 20 else None}
+
+    def run_detail(self, run_id: str, *, offset: int = 0) -> dict[str, Any]:
+        from .progress import ProgressStore
+
+        self._validate_run_id(run_id)
+        if type(offset) is not int or not 0 <= offset <= 1_000_000:
+            raise ValueError("invalid run offset")
+        options = self._options()
+        with ProgressStore(self.path) as store:
+            reason = store.incompatibility(run_id, options.model_dump(mode="json"), self._progress_signature(options))
+            rows = store.items(run_id)[offset:offset + 21]
+            items = [{"item_id": row["id"], **{key: row[key] for key in (
+                "evidence_id", "title", "status", "model_calls", "detail")},
+                "report_ids": json.loads(row["report_ids_json"])[:300]} for row in rows[:20]]
+            return {"run": store.summary(run_id, reason=reason), "items": items, "offset": offset,
+                    "next_offset": offset + 20 if len(rows) > 20 else None}
+
+    @staticmethod
+    def _validate_run_id(run_id: str) -> None:
+        if not isinstance(run_id, str) or len(run_id) != 32 or any(char not in "0123456789abcdef" for char in run_id):
+            raise ValueError("invalid run id")
+
+    def resume(self, run_id: str, *, ack_uncertain: bool = False) -> dict[str, Any]:
+        from .progress import ProgressStore, ResumeError
+
+        self._validate_run_id(run_id)
+        if type(ack_uncertain) is not bool:
+            raise ValueError("invalid uncertain acknowledgement")
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise ResumeError("run_active")
+            try:
+                lease = ResearchLease(self.path)
+            except ValueError:
+                raise ResumeError("run_active") from None
+            try:
+                options = self._options()
+                with ProgressStore(self.path) as store:
+                    store.recover()
+                    reason = store.incompatibility(run_id, options.model_dump(mode="json"), self._progress_signature(options))
+                    if reason:
+                        raise ResumeError(reason)
+                    store.begin_resume(run_id, ack_uncertain=ack_uncertain)
+                self._lease = lease
+                self._run_id = run_id
+                self._stop.clear()
+                self._state, self._mode, self._stage = "RUNNING", "resume", "analysis"
+                self._next_run_at = None
+                self._thread = threading.Thread(target=self._worker, args=(False, None),
+                                                name="alpha-guard-research", daemon=True)
+                self._thread.start()
+            except Exception:
+                lease.close()
+                self._lease = None
+                self._state = "STOPPED"
+                raise
+        return {"run_id": run_id, "state": "RUNNING", "mode": "resume"}
+
     def launch(self, *, continuous: bool = False, media: Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise ValueError("research is already running")
             self._options()  # validate before changing runtime state
             self._lease = ResearchLease(self.path)
+            try:
+                from .progress import ProgressStore
+                with ProgressStore(self.path) as store:
+                    store.recover()
+                    options = self._options()
+                    self._run_id = (None if media else store.create_run(
+                        options.model_dump(mode="json"), self._progress_signature(options),
+                        "monitor" if continuous else "once"))
+            except Exception:
+                self._lease.close()
+                self._lease = None
+                raise
             self._stop.clear()
             self._mode = "monitor" if continuous else ("transcribe" if media else "once")
             self._state = "RUNNING"
@@ -475,7 +666,7 @@ class ResearchService:
                 self._lease = None
                 self._state = "STOPPED"
                 raise
-        return {"accepted": True, "state": "RUNNING", "mode": self._mode}
+        return {"accepted": True, "state": "RUNNING", "mode": self._mode, "run_id": self._run_id}
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
@@ -499,11 +690,19 @@ class ResearchService:
     def _set_stage(self, stage: str) -> None:
         with self._lock:
             self._stage = stage
+            run_id = self._run_id
+        if run_id:
+            from .progress import ProgressStore
+            with ProgressStore(self.path) as store:
+                store.stage(run_id, stage)
 
     def _worker(self, continuous: bool, media: Mapping[str, Any] | None) -> None:
         try:
             if media is not None:
                 self._transcribe(media)
+                return
+            if self._mode == "resume" and self._run_id:
+                self._analyze_batch(self._run_id)
                 return
             while not self._stop.is_set():
                 self._scan()
@@ -520,11 +719,29 @@ class ResearchService:
             with self._lock:
                 self._last_run = {"status": "failed", "detail": "research_failed"}
             try:
+                from .progress import ProgressStore
+                if self._run_id:
+                    with ProgressStore(self.path) as progress:
+                        progress.recover()
+                        progress.finish_run(self._run_id, "failed", "research_failed")
                 with ResearchStore(self.path) as store:
                     store.record_run("failed", "research_failed")
             except Exception:
                 pass  # A broken store must not retain the running state or lease.
         finally:
+            # Stop may arrive before the worker enters its first scan. That is
+            # a cancelled collection, not a batch that remains running forever.
+            if self._run_id:
+                try:
+                    from .progress import ProgressStore
+                    with ProgressStore(self.path) as progress:
+                        run = progress.load_run(self._run_id)
+                        if run["status"] == "running":
+                            progress.recover()
+                            progress.finish_run(self._run_id, "cancelled" if self._stop.is_set() else "interrupted",
+                                                "process_interrupted" if run["frozen"] else "collection_not_resumable")
+                except Exception:
+                    pass  # A failed database cannot prevent releasing ownership.
             with self._lock:
                 if self._lease is not None:
                     self._lease.close()
@@ -558,12 +775,17 @@ class ResearchService:
 
     def _scan(self) -> None:
         from config import get_settings
-        from .analysis import AnalysisBudget, analyze_evidence
+        from .progress import ProgressStore
         from .connectors import discover, fetch_article
         from .market import fetch_market_context
 
         started = datetime.now(UTC)
         options = self._options()
+        with ProgressStore(self.path) as progress:
+            if self._run_id is None or progress.load_run(self._run_id)["status"] != "running":
+                self._run_id = progress.create_run(options.model_dump(mode="json"),
+                                                   self._progress_signature(options),
+                                                   "monitor" if self._mode == "monitor" else "once")
         environment = get_settings()
         browser_enabled = environment.research_browser_enabled
         media_handler = None
@@ -668,40 +890,103 @@ class ResearchService:
                     )(_public(instrument), cancelled=self._stop.is_set)
                 except Exception:
                     contexts[f"{instrument.market}:{instrument.ticker}"] = {"quality_issues": ["market_unavailable"]}
-        count = 0
-        budget = AnalysisBudget(options.max_ai_calls)
-        analysis_statuses: dict[str, int] = {}
-        self._set_stage("analyzing")
-        with ResearchStore(self.path) as store:
-            for material in evidence:
+        with ProgressStore(self.path) as progress:
+            if self._stop.is_set():
+                progress.finish_run(self._run_id, "cancelled", "collection_not_resumable")
+                result = {"status": "cancelled", "fetched": len(items), "reports": 0,
+                          "model_calls": 0, "sources": source_results,
+                          "finished_at": datetime.now(UTC).isoformat()}
+                progress.record_run("cancelled", started_at=started, stats=result)
+                with self._lock:
+                    self._last_run = result
+                return
+            progress.freeze(self._run_id, evidence, contexts,
+                            [_source_summary(source) for source in source_results])
+        extra: dict[str, Any] = {"fetched": len(items)}
+        if media_handler is not None:
+            extra.update(media_attempts=media_handler.attempts,
+                         media_cache_hits=media_handler.cache_hits,
+                         transcription_calls=media_handler.budget.used_calls)
+        self._analyze_batch(self._run_id, extra=extra)
+
+    def _analyze_batch(self, run_id: str, *, extra: Mapping[str, Any] | None = None) -> None:
+        from .analysis import analyze_evidence
+        from .progress import PersistentBudget, ProgressStore
+
+        self._set_stage("analysis")
+        with ProgressStore(self.path) as store:
+            run = store.load_run(run_id)
+            options = ResearchOptions.model_validate_json(run["options_json"])
+            instruments = [item for item in options.instruments if item.market in options.markets]
+            contexts = json.loads(run["contexts_json"])
+            source_results = json.loads(run["sources_json"])
+            budget = PersistentBudget(store, run_id)
+            for item in store.items(run_id):
                 if self._stop.is_set():
                     break
-                reports = (self._analyzer or analyze_evidence)(
-                    material, instruments, horizons=options.horizons,
-                    market_contexts=contexts, store=store,
-                    ai_enabled=options.ai_enabled, budget=budget,
-                    cancelled=self._stop.is_set,
-                )
+                if item["status"] == "completed":
+                    continue
+                material = store.get_evidence(item["evidence_id"])
+                if material is None:
+                    store.finish_item(run_id, item["id"], [], "failed", "material_missing")
+                    continue
+                store.begin_item(run_id, item["id"])
+                budget.item_id = item["id"]
+                before = budget.used_calls
+                try:
+                    reports = (self._analyzer or analyze_evidence)(
+                        material, instruments, horizons=options.horizons,
+                        market_contexts=contexts, store=store,
+                        ai_enabled=options.ai_enabled, budget=budget,
+                        cancelled=self._stop.is_set, persist_reports=False,
+                    )
+                except Exception:
+                    uncertain = budget.used_calls > before
+                    store.finish_item(run_id, item["id"], [],
+                                      "uncertain" if uncertain else "failed",
+                                      "result_unconfirmed" if uncertain else "analysis_failed")
+                    continue
                 if self._stop.is_set():
+                    uncertain = budget.used_calls > before
+                    store.finish_item(run_id, item["id"], [],
+                                      "uncertain" if uncertain else "pending",
+                                      "result_unconfirmed" if uncertain else "cancelled")
                     break
-                for report in reports:
-                    saved = store.save_report(report)
-                    analysis_statuses[saved.status] = analysis_statuses.get(saved.status, 0) + 1
-                    count += 1
-            failures = [item for item in source_results if item.get("status") in {"failed", "permission_required", "unsupported", "needs_configuration", "partial"}]
+                extraction_statuses = {report.extraction_status for report in reports}
+                if "failed" in extraction_statuses and budget.used_calls > before:
+                    item_status, detail = "uncertain", "result_unconfirmed"
+                elif extraction_statuses & {"failed", "invalid_output"}:
+                    item_status, detail = "failed", "analysis_failed"
+                elif options.ai_enabled and "unavailable" in extraction_statuses:
+                    item_status, detail = "failed", "model_unavailable"
+                elif "budget_exhausted" in extraction_statuses:
+                    item_status, detail = "pending", "model_budget_exhausted"
+                else:
+                    item_status, detail = "completed", ""
+                store.finish_item(run_id, item["id"], reports, item_status, detail)
+            statuses = store._connection.execute(
+                "SELECT json_extract(r.payload_json,'$.status'),COUNT(*) FROM research_scan_items i, "
+                "json_each(i.report_ids_json) ids JOIN research_reports r ON r.id=ids.value "
+                "WHERE i.run_id=? GROUP BY json_extract(r.payload_json,'$.status')", (run_id,)).fetchall()
+            analysis_statuses = {row[0]: row[1] for row in statuses}
+            counts = store.summary(run_id)
+            failures = [item for item in source_results if item.get("status") in {
+                "failed", "permission_required", "unsupported", "needs_configuration", "partial"}]
             successes = [item for item in source_results if item.get("status") in {"success", "partial"}]
             status = "cancelled" if self._stop.is_set() else (
                 "partial" if failures and successes else "failed" if failures else
-                "success" if successes or evidence else "disabled"
-            )
+                "success" if successes or counts["total"] else "disabled")
+            if counts["failed"] or counts["uncertain"] or counts["pending"]:
+                status = "cancelled" if self._stop.is_set() else "partial"
             if options.ai_enabled and any(analysis_statuses.get(key, 0) for key in ("failed", "invalid_output", "needs_configuration")):
                 status = "partial" if status == "success" else status
-            result = {"model_calls": budget.used_calls, "analysis_statuses": analysis_statuses, "status": status, "fetched": len(items), "reports": count, "sources": source_results, "finished_at": datetime.now(UTC).isoformat()}
-            if media_handler is not None:
-                result.update(media_attempts=media_handler.attempts,
-                              media_cache_hits=media_handler.cache_hits,
-                              transcription_calls=media_handler.budget.used_calls)
-            store.record_run(status, started_at=started, stats=result)
+            store.finish_run(run_id, "cancelled" if self._stop.is_set() else (
+                "completed" if counts["completed"] == counts["total"] else "partial"))
+            result = {**dict(extra or {}), "run_id": run_id, "model_calls": budget.used_calls,
+                      "analysis_statuses": analysis_statuses, "status": status,
+                      "reports": sum(analysis_statuses.values()), "sources": source_results,
+                      "finished_at": datetime.now(UTC).isoformat()}
+            store.record_run(status, started_at=datetime.fromisoformat(run["created_at"]), stats=result)
         with self._lock:
             self._last_run = result
 

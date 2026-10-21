@@ -120,6 +120,76 @@ def scan() -> None:
     _run()
 
 
+@app.command("runs")
+def runs(offset: Annotated[int, typer.Option(min=0, max=1_000_000)] = 0) -> None:
+    """分页读取本地分析批次与继续条件；不联网、不自动续跑。"""
+    service = _service()
+    try:
+        _print(service.run_list(offset=offset))
+    except ValueError:
+        typer.echo("无法读取运行历史；请检查研究设置和分页参数。", err=True)
+        raise typer.Exit(2) from None
+    finally:
+        service.close()
+
+
+@app.command("run-show")
+def run_show(run_id: str,
+             offset: Annotated[int, typer.Option(min=0, max=1_000_000)] = 0) -> None:
+    """离线读取批次中的已完成、待处理和失败条目；每页最多20条。"""
+    service = _service()
+    try:
+        _print(service.run_detail(run_id, offset=offset))
+    except ValueError:
+        typer.echo("找不到运行批次，或研究设置、分页参数无效。", err=True)
+        raise typer.Exit(2) from None
+    finally:
+        service.close()
+
+
+@app.command("resume")
+def resume(
+    run_id: str,
+    ack_uncertain: Annotated[bool, typer.Option("--ack-uncertain",
+        help="确认重试结果未确认的模型调用；可能产生额外调用费用")] = False,
+) -> None:
+    """显式继续兼容批次的未完成分析，等待结果入库后结束。"""
+    from .ipc import execute
+
+    service = _service()
+    interrupted = False
+    try:
+        receipt = execute(service, {"command": "resume", "run_id": run_id,
+                                    "ack_uncertain": ack_uncertain})
+        if not receipt["accepted"]:
+            _print(receipt)
+            if receipt["result"]["status"] == "ack_required":
+                typer.echo("确认额外调用风险后，可使用 --ack-uncertain 显式继续。", err=True)
+            raise typer.Exit(2)
+        try:
+            service.wait()
+        except KeyboardInterrupt:
+            interrupted = True
+            service.stop()
+            service.wait()
+        result = service.run_detail(run_id)
+        result["last_run"] = service.snapshot()["runtime"].get("last_run")
+    except ValueError:
+        typer.echo("无法继续该批次；请检查批次ID和研究设置。", err=True)
+        raise typer.Exit(2) from None
+    finally:
+        service.close()
+    _print(result)
+    if interrupted:
+        raise typer.Exit(130)
+    run = result["run"]
+    if (run.get("status") != "completed"
+            or any(run.get(state, 0) for state in ("failed", "pending", "uncertain", "running"))
+            or (result["last_run"] or {}).get("status") in {
+                "failed", "partial", "needs_configuration", "cancelled"}):
+        raise typer.Exit(1)
+
+
 @app.command("watch")
 def watch() -> None:
     """显式前台跟踪，按保存的频率执行；退出即停止。"""
@@ -208,13 +278,13 @@ def digest_status() -> None:
 
 @app.command("digest-configure")
 def digest_configure(path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) -> None:
-    """保存每日摘要设置JSON；开启后由 Guardian 按计划执行。"""
+    """保存摘要JSON；notify_channels 可选 telegram/whatsapp，后者仅模板通知。"""
     try:
         if path.stat().st_size > 64_000:
             raise ValueError("settings too large")
         _print(_service().save_digest_settings(json.loads(path.read_text(encoding="utf-8"))))
     except (ValueError, TypeError, OSError):
-        typer.echo("摘要设置无效；请检查时刻、主题和开关。", err=True)
+        typer.echo("摘要设置无效；请检查时刻、主题、开关和接收渠道。", err=True)
         raise typer.Exit(2) from None
 
 
@@ -223,9 +293,9 @@ def digest_run() -> None:
     """立即生成一轮摘要；不改变已设定的每日计划。"""
     from .digest import submit_manual_digest
 
-    receipt = submit_manual_digest(_service().path)
+    receipt = submit_manual_digest(_service().path, wait=True)
     _print(receipt)
-    if not receipt.get("accepted"):
+    if not receipt.get("accepted") or receipt.get("status") != "completed":
         raise typer.Exit(1)
 
 
