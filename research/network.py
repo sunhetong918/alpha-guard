@@ -90,6 +90,25 @@ def validate_public_url(url: str, *, resolve: bool = True,
         raise ContentAccessError("invalid_or_unresolvable_url") from None
 
 
+DEFAULT_USER_AGENT = "AlphaGuard/0.3 research-reader"
+# SEC Fair Access policy: www.sec.gov original documents are served only to a
+# User-Agent of the shape "Sample Company Name AdminContact@example.com" —
+# name-only, URL-only and browser UAs are rejected with 403 (verified live
+# 2026-10-21). Build that shape for every sec.gov hop, redirects included.
+SEC_USER_AGENT_PREFIX = "AlphaGuard Research Reader"
+
+
+def _user_agent_for(hostname: str) -> str:
+    host = hostname.rstrip(".").lower()
+    if host == "sec.gov" or host.endswith(".sec.gov"):
+        from config import get_settings
+
+        contact = get_settings().research_sec_contact.strip()
+        if contact:
+            return f"{SEC_USER_AGENT_PREFIX} {contact}"
+    return DEFAULT_USER_AGENT
+
+
 def safe_fetch(
     url: str, *, timeout: float = 10, max_bytes: int = 2_000_000,
     cancelled: Callable[[], bool] | None = None,
@@ -144,7 +163,7 @@ def safe_fetch(
             check_cancelled(cancelled)
             path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             connection.request("GET", path, headers={
-                "User-Agent": "AlphaGuard/0.3 research-reader",
+                "User-Agent": _user_agent_for(host),
                 "Accept": "text/*,application/json,application/xml,application/rss+xml,application/atom+xml",
                 "Accept-Encoding": "identity",
             })

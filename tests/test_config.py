@@ -298,3 +298,19 @@ def test_enabled_heartbeat_requires_safe_http_endpoint(heartbeat_url):
         ValidationError, match="enabled heartbeat endpoint configuration is invalid"
     ):
         Settings(heartbeat_enabled=True, heartbeat_url=heartbeat_url)
+
+
+def test_research_sec_contact_defaults_to_public_contact(monkeypatch):
+    for key in ("RESEARCH_SEC_CONTACT", "ALPHA_GUARD_RESEARCH_SEC_CONTACT"):
+        monkeypatch.delenv(key, raising=False)
+
+    assert get_settings(None).research_sec_contact == "sunhetong918@gmail.com"
+
+
+@pytest.mark.parametrize(
+    "contact",
+    ["", "no-at-sign.example.com", "a b@example.org", "x@y@z", "x@example.org outer"],
+)
+def test_research_sec_contact_rejects_malformed_values(contact):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, research_sec_contact=contact)

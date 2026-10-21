@@ -454,6 +454,18 @@ class Settings(BaseSettings):
     whatsapp_trust_template_name: WhatsAppTemplateName | None = Field(
         default=None, validation_alias="WHATSAPP_TRUST_TEMPLATE_NAME"
     )
+    # SEC Fair Access requires a reachable contact inside the User-Agent for
+    # www.sec.gov original documents; data.sec.gov JSON is more lenient.
+    # The default is the repository owner's public GitHub contact email.
+    research_sec_contact: str = Field(
+        default="sunhetong918@gmail.com",
+        validation_alias=AliasChoices(
+            "RESEARCH_SEC_CONTACT", "ALPHA_GUARD_RESEARCH_SEC_CONTACT"
+        ),
+        min_length=3,
+        max_length=254,
+        pattern=r"^[^\s@<>\"',;:]+@[^\s@<>\"',;:]+\.[^\s@<>\"',;:]+$",
+    )
     finnhub_api_key: SecretStr | None = Field(
         default=None, validation_alias="FINNHUB_API_KEY"
     )

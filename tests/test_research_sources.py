@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import config
 from research import connectors, ingest, market, network
 from research.network import ContentAccessError, FetchedContent
 
@@ -233,6 +234,7 @@ def _fake_transport(monkeypatch, responses):
             self.host, self.sock = host, None
             connections.append(self)
         def request(self, method, path, **kwargs):
+            self.request_headers = kwargs.get('headers')
             self._create_connection((self.host, 443))
         def getresponse(self):
             return responses.pop(0)
@@ -264,6 +266,39 @@ def test_safe_fetch_rejects_oversize_and_limits_redirects(monkeypatch):
     _fake_transport(monkeypatch, [_Response(302, Location='https://example.com/loop') for _ in range(4)])
     with pytest.raises(ContentAccessError, match='too_many_redirects'):
         network.safe_fetch('https://example.com')
+
+
+def _stub_settings(monkeypatch, contact: str) -> None:
+    from config import Settings
+
+    monkeypatch.setattr(
+        config,
+        'get_settings',
+        lambda: Settings(_env_file=None, research_sec_contact=contact),
+    )
+
+
+def test_sec_hosts_get_fair_access_user_agent(monkeypatch):
+    _stub_settings(monkeypatch, 'ops@example.org')
+    agent = f'{network.SEC_USER_AGENT_PREFIX} ops@example.org'
+    for host in ('sec.gov', 'www.sec.gov', 'data.sec.gov', 'SEC.GOV'):
+        assert network._user_agent_for(host) == agent, host
+    for host in ('example.com', 'sec.gov.evil.com', 'notsec.gov', ''):
+        assert network._user_agent_for(host) == network.DEFAULT_USER_AGENT, host
+
+
+def test_safe_fetch_sends_sec_agent_on_wire_and_each_redirect_hop(monkeypatch):
+    _stub_settings(monkeypatch, 'ops@example.org')
+    _, connections = _fake_transport(monkeypatch, [
+        _Response(302, Location='https://www.sec.gov/Archives/x.htm'),
+        _Response(body=b'filing'),
+    ])
+    result = network.safe_fetch('https://example.com/filing')
+    assert result.text == 'filing'
+    assert result.url == 'https://www.sec.gov/Archives/x.htm'
+    assert connections[0].request_headers['User-Agent'] == network.DEFAULT_USER_AGENT
+    sec_agent = f'{network.SEC_USER_AGENT_PREFIX} ops@example.org'
+    assert connections[1].request_headers['User-Agent'] == sec_agent
 
 
 def test_subtitle_import_keeps_cues_speaker_and_rejects_bad_timing():

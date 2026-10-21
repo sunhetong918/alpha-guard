@@ -98,7 +98,7 @@ def parse_filings(data: Any, *, instrument: ResearchInstrument, cik: int,
                         'title': f'{form} · 已提交披露' + (f' · 报告期 {period}' if period else ''),
                         'event_date': day.isoformat(), 'event_at': None, 'event_timezone': 'America/New_York',
                         'published_at': published, 'observed_at': now.isoformat(), 'status': 'confirmed',
-                        'notes': '日期为 SEC 披露日，不是未来计划；修订稿独立保存。原文链接可用性需单独核对。',
+                        'notes': '日期为 SEC 披露日，不是未来计划；修订稿独立保存。原文读取需符合 SEC Fair Access 的 User-Agent（RESEARCH_SEC_CONTACT）。',
                         'filing': metadata.model_dump(mode='json')})
     return entries
 
