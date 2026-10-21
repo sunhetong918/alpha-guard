@@ -43,7 +43,7 @@ jobs:
       - name: Warm registry cache for offline packaging test
         run: >-
           uv venv /tmp/uv-warm && uv pip install --python /tmp/uv-warm/bin/python
-          --all-extras .
+          '.[desktop]'
 
       - name: Lint
         run: uv run ruff check .
